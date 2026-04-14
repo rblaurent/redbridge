@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.uv-cache/
+
+# uv
+# keep uv.lock tracked
+
+# Node / Vite
+node_modules/
+webui/dist/
+*.tsbuildinfo
+*.log
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Runtime
+daemon/config.json

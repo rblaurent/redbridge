@@ -7,4 +7,5 @@ from behaviors import (  # noqa: F401
     run_command,
     static_label,
     volume_control,
+    wallpaper_tile,
 )

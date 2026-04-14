@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from behaviors.base import Behavior, TargetKind
+from gfx import font
 from registry import register
 
 
@@ -22,33 +23,6 @@ def _parse_color(s: str | None, default: tuple[int, int, int]) -> tuple[int, int
         return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
     except ValueError:
         return default
-
-
-# Fonts are loaded once and reused across render calls.
-_FONT_CACHE: dict[int, ImageFont.ImageFont] = {}
-_FONT_CANDIDATES = [
-    r"C:\Windows\Fonts\segoeui.ttf",
-    r"C:\Windows\Fonts\arial.ttf",
-]
-
-
-def _font(size: int) -> ImageFont.ImageFont:
-    cached = _FONT_CACHE.get(size)
-    if cached is not None:
-        return cached
-    for path in _FONT_CANDIDATES:
-        try:
-            f = ImageFont.truetype(path, size)
-            _FONT_CACHE[size] = f
-            return f
-        except OSError:
-            continue
-    try:
-        f = ImageFont.load_default(size=size)
-    except TypeError:
-        f = ImageFont.load_default()
-    _FONT_CACHE[size] = f
-    return f
 
 
 @register
@@ -96,7 +70,7 @@ class StaticLabelBehavior(Behavior):
 
         if text:
             size = int(self.config.get("font_size") or 16)
-            font = _font(size)
+            font = font(size)
             draw = ImageDraw.Draw(img)
             bbox = draw.textbbox((0, 0), text, font=font)
             tw = bbox[2] - bbox[0]

@@ -6,9 +6,9 @@ configuration and live mirroring.
 
 ## Status
 
-Steps 1–6 complete: scaffold, device I/O, behavior ABC + registry, FastAPI
-config persistence, visual deck mock, WebSocket live mirror (physical device
-and web UI stay in sync, including input flashes).
+Steps 1–8 complete: scaffold, device I/O, behavior ABC + registry, FastAPI
+config persistence, visual deck mock, WebSocket live mirror, config panel +
+schema form, and the flagship `claude_code_idle` behavior + hook bridge.
 
 ## Prereqs
 

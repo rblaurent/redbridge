@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 import behaviors  # noqa: F401 — side-effect: populates registry
 from registry import all_behaviors
 from runtime import DeckRuntime
+from sessions import HOOKS, event_from_payload
 
 
 DAEMON_DIR = Path(__file__).resolve().parent
@@ -181,7 +182,12 @@ def get_state() -> StateSnapshot:
 
 @app.post("/hook/event")
 async def hook_event(payload: dict[str, Any]) -> dict[str, str]:
-    # Full dispatch lands in step 8. For now, just acknowledge.
+    evt = event_from_payload(payload)
+    print(
+        f"[hook] {evt.hook!r} session={evt.session_id[:8]} hwnd={evt.hwnd}",
+        flush=True,
+    )
+    HOOKS.publish(evt)
     return {"ok": "accepted"}
 
 

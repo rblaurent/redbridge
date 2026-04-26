@@ -156,6 +156,7 @@ async def lifespan(_app: FastAPI):
     global _runtime
     loop = asyncio.get_running_loop()
     _runtime = DeckRuntime(hub, loop)
+    _runtime.set_layout_loader(load_layout)
     _runtime.start()
     _runtime.apply_settings(load_settings())
     _runtime.apply_layout(load_layout())

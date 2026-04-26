@@ -12,7 +12,8 @@ import base64
 import io
 import threading
 import time
-from typing import Any, Protocol
+from pathlib import Path
+from typing import Any, Callable, Protocol
 
 from PIL import Image
 from StreamDeck.DeviceManager import DeviceManager
@@ -21,7 +22,9 @@ from StreamDeck.ImageHelpers import PILHelper
 
 import behaviors  # noqa: F401 — register behaviors
 from behaviors.base import Behavior, EventBus, Target, TargetKind
-from registry import get as get_behavior
+from registry import get as get_behavior, reload_behaviors
+
+_BEHAVIORS_DIR = Path(__file__).resolve().parent / "behaviors"
 
 
 class _Hub(Protocol):
@@ -52,10 +55,16 @@ class DeckRuntime:
         self._last_input: float = time.monotonic()
         self._asleep: bool = False
 
+        self._layout_loader: Callable[[], Any] | None = None
+        self._watch_thread: threading.Thread | None = None
+
         self._bus.subscribe("overlay:set", self._on_overlay_set)
         self._bus.subscribe("overlay:clear", self._on_overlay_clear)
 
     # ---- lifecycle -----------------------------------------------------------
+
+    def set_layout_loader(self, loader: Callable[[], Any]) -> None:
+        self._layout_loader = loader
 
     def start(self) -> bool:
         try:
@@ -82,6 +91,8 @@ class DeckRuntime:
 
         self._tick_thread = threading.Thread(target=self._tick_loop, daemon=True)
         self._tick_thread.start()
+        self._watch_thread = threading.Thread(target=self._watch_loop, daemon=True)
+        self._watch_thread.start()
         return self._deck is not None
 
     def stop(self) -> None:
@@ -94,6 +105,8 @@ class DeckRuntime:
                 pass
         if self._tick_thread is not None:
             self._tick_thread.join(timeout=1.0)
+        if self._watch_thread is not None:
+            self._watch_thread.join(timeout=1.0)
 
     # ---- settings ------------------------------------------------------------
 
@@ -337,3 +350,33 @@ class DeckRuntime:
                         self._render_strip(idx, b)
                 except Exception as e:
                     print(f"[runtime] tick strip {idx}: {e}", flush=True)
+
+    # ---- hot reload ----------------------------------------------------------
+
+    def _watch_loop(self) -> None:
+        mtimes: dict[str, float] = {}
+        for p in _BEHAVIORS_DIR.glob("*.py"):
+            mtimes[str(p)] = p.stat().st_mtime
+        while not self._stop.wait(1.0):
+            changed = False
+            for p in _BEHAVIORS_DIR.glob("*.py"):
+                key = str(p)
+                mtime = p.stat().st_mtime
+                prev = mtimes.get(key)
+                if prev is None or mtime != prev:
+                    mtimes[key] = mtime
+                    if prev is not None:
+                        changed = True
+            if changed:
+                print("[runtime] behavior file change detected, reloading…", flush=True)
+                try:
+                    reload_behaviors()
+                except Exception as e:
+                    print(f"[runtime] reload failed: {e}", flush=True)
+                    continue
+                if self._layout_loader is not None:
+                    try:
+                        self.apply_layout(self._layout_loader())
+                    except Exception as e:
+                        print(f"[runtime] re-apply layout failed: {e}", flush=True)
+                print("[runtime] reload complete", flush=True)

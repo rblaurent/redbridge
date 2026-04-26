@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,3 +27,15 @@ def get(type_id: str) -> type["Behavior"] | None:
 
 def all_behaviors() -> dict[str, type["Behavior"]]:
     return dict(BEHAVIORS)
+
+
+def reload_behaviors() -> None:
+    """Clear registry, reload all behavior modules, re-populate via @register."""
+    BEHAVIORS.clear()
+    mods = [
+        name for name in list(sys.modules)
+        if name.startswith("behaviors.") and name != "behaviors.base"
+    ]
+    for name in mods:
+        importlib.reload(sys.modules[name])
+    importlib.reload(sys.modules["behaviors"])

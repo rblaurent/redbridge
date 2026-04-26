@@ -165,10 +165,10 @@ def _clamped_index(n: int) -> int:
 def _status_color(hook: str) -> tuple[int, int, int]:
     if hook in THINKING_HOOKS:
         return CLAUDE_ORANGE
+    if hook == "Notification":
+        return STATUS_GREEN
     if hook == "Stop":
         return STATUS_GREEN
-    if hook == "Notification":
-        return STATUS_RED
     return DIM_GREY
 
 

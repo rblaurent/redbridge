@@ -150,25 +150,16 @@ class ClaudeCodeIdleBehavior(Behavior):
 
     @staticmethod
     def _draw_pill(draw: ImageDraw.ImageDraw, key_w: int, count: int) -> None:
-        text = str(count) if count < 100 else "99+"
-        f = font(16)
-        bbox = draw.textbbox((0, 0), text, font=f)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-        pad_x = 8
-        pad_y = 3
-        pw = max(24, tw + 2 * pad_x)
-        ph = th + 2 * pad_y + 2
-        px = key_w - pw - 6
-        py = 6
-        draw.rounded_rectangle(
-            (px, py, px + pw, py + ph),
-            radius=ph // 2,
-            fill=(210, 74, 74),
+        text = str(count) if count < 100 else "99"
+        f = font(14)
+        d = 24
+        cx = key_w - d // 2 - 6
+        cy = 6 + d // 2
+        draw.ellipse(
+            (cx - d // 2, cy - d // 2, cx + d // 2, cy + d // 2),
+            fill=(80, 80, 80),
         )
-        tx = px + (pw - tw) // 2 - bbox[0]
-        ty = py + (ph - th) // 2 - bbox[1]
-        draw.text((tx, ty), text, fill=(255, 255, 255), font=f)
+        draw.text((cx, cy), text, fill=(255, 255, 255), font=f, anchor="mm")
 
     def on_press(self) -> None:
         waiting = sorted(

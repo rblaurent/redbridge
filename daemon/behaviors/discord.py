@@ -355,7 +355,6 @@ def _connect_and_run(httpx, gen: int) -> float:
 
         with _lock:
             _state.connected = True
-            _state.volume = _get_discord_volume()
             _state.last_update = time.monotonic()
         _log("RPC subscribed")
 
@@ -417,6 +416,9 @@ def _recv_loop_sync(pipe: _IpcPipe, httpx_mod, gen: int) -> None:
                     _state.muted = bool(data["mute"])
                 if "deaf" in data:
                     _state.deafened = bool(data["deaf"])
+                output = data.get("output", {})
+                if "volume" in output:
+                    _state.volume = output["volume"] / 100.0
                 _state.last_update = time.monotonic()
 
         elif cmd == "DISPATCH" and evt == "VOICE_CHANNEL_SELECT":
@@ -446,11 +448,14 @@ def _recv_loop_sync(pipe: _IpcPipe, httpx_mod, gen: int) -> None:
             if evt != "ERROR" and data:
                 _update_guild(data, httpx_mod)
 
-        elif cmd == "GET_VOICE_SETTINGS":
+        elif cmd == "GET_VOICE_SETTINGS" or (cmd == "SET_VOICE_SETTINGS" and evt != "ERROR"):
             if data:
+                output = data.get("output", {})
+                vol = output.get("volume", 0)
                 with _lock:
                     _state.muted = bool(data.get("mute", False))
                     _state.deafened = bool(data.get("deaf", False))
+                    _state.volume = vol / 100.0
                     _state.last_update = time.monotonic()
 
         now = time.monotonic()
@@ -908,9 +913,10 @@ class DiscordVolume(Behavior):
         _ensure_poller()
 
     def on_rotate(self, delta: int) -> None:
-        current = _get_discord_volume()
-        new_vol = max(0.0, min(1.0, current + delta * 0.02))
-        _set_discord_volume(new_vol)
+        s = _snap()
+        new_vol = max(0.0, min(1.0, s.volume + delta * 0.02))
+        new_pct = int(new_vol * 100)
+        _enqueue_cmd("SET_VOICE_SETTINGS", {"output": {"volume": new_pct}})
         now = time.monotonic()
         with _lock:
             _state.volume = new_vol

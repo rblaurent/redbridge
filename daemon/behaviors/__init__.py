@@ -7,6 +7,7 @@ from behaviors import (  # noqa: F401
     empty,
     launch_app,
     run_command,
+    spotify,
     static_label,
     volume_control,
     wallpaper_tile,

@@ -70,6 +70,8 @@ def _poll() -> tuple[int, int, list[SessionInfo]]:
     cutoff = now - STALE_AFTER_SECONDS
     alive: list[SessionInfo] = []
     for s in SESSIONS.snapshot():
+        if not s.hwnd:
+            continue
         if s.last_seen < cutoff:
             SESSIONS.drop(s.session_id)
             print(f"[claude_code] purge session={s.session_id[:8]} reason=stale", flush=True)
@@ -105,7 +107,7 @@ class ClaudeCodeIdleBehavior(Behavior):
             self._last_purge = now
             t, w, alive = _poll()
         else:
-            snap = SESSIONS.snapshot()
+            snap = [s for s in SESSIONS.snapshot() if s.hwnd]
             alive = snap
             t = sum(1 for s in snap if s.last_hook in THINKING_HOOKS)
             w = sum(1 for s in snap if s.last_hook in WAITING_HOOKS)

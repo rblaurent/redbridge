@@ -342,10 +342,6 @@ class SpotifyStrip(Behavior):
         draw = ImageDraw.Draw(img)
 
         if not s.active or not s.track:
-            draw.text(
-                (w // 2, h // 2), "No music playing",
-                fill=DIM_GREY, font=font(14), anchor="mm",
-            )
             return img
 
         tf = font(15)

@@ -16,6 +16,7 @@ import ctypes
 import io
 import json
 import os
+import struct
 import threading
 import time
 import uuid
@@ -50,7 +51,7 @@ def _log(msg: str) -> None:
 DISCORD_CLIENT_ID = "1372561907680149644"
 DISCORD_CLIENT_SECRET = "WCVByCOz2eR7aywq4xe1RIgnMRr0Vh9i"
 DISCORD_REDIRECT_URI = "http://localhost"
-DISCORD_RPC_PORTS = range(6463, 6473)
+DISCORD_IPC_PIPES = ["\\\\.\\pipe\\discord-ipc-" + str(i) for i in range(10)]
 RECONNECT_DELAY = 5.0
 AUTH_FAILURE_DELAY = 30.0
 CHANNEL_POLL_INTERVAL = 3.0
@@ -218,13 +219,6 @@ def _nonce() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def _rpc_msg(cmd: str, args: dict | None = None, evt: str | None = None) -> str:
-    msg: dict = {"cmd": cmd, "nonce": _nonce()}
-    if args is not None:
-        msg["args"] = args
-    if evt is not None:
-        msg["evt"] = evt
-    return json.dumps(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -234,28 +228,81 @@ def _rpc_msg(cmd: str, args: dict | None = None, evt: str | None = None) -> str:
 _poller_started = False
 _poller_start_lock = threading.Lock()
 _cmd_queue: asyncio.Queue | None = None
-_loop_ref: asyncio.AbstractEventLoop | None = None
 _auth_prompted = False
 _generation = id(threading.Lock())
 
 
 def _enqueue_cmd(cmd: str, args: dict) -> None:
-    if _cmd_queue is not None and _loop_ref is not None:
-        _loop_ref.call_soon_threadsafe(_cmd_queue.put_nowait, (cmd, args))
+    if _cmd_queue is not None:
+        _cmd_queue.put_nowait((cmd, args))
 
 
-async def _rpc_loop(gen: int) -> None:
+# ---------------------------------------------------------------------------
+# IPC transport (named pipes)
+# ---------------------------------------------------------------------------
+
+OP_HANDSHAKE = 0
+OP_FRAME = 1
+OP_CLOSE = 2
+
+
+class _IpcPipe:
+    """Discord RPC over Windows named pipe."""
+
+    def __init__(self, handle):
+        import win32file
+        self._h = handle
+        self._wf = win32file
+
+    def send(self, payload: dict, opcode: int = OP_FRAME) -> None:
+        raw = json.dumps(payload).encode("utf-8")
+        header = struct.pack("<II", opcode, len(raw))
+        self._wf.WriteFile(self._h, header + raw)
+
+    def recv(self) -> dict:
+        _, header = self._wf.ReadFile(self._h, 8)
+        _op, length = struct.unpack("<II", header)
+        _, data = self._wf.ReadFile(self._h, length)
+        return json.loads(data.decode("utf-8"))
+
+    def close(self) -> None:
+        try:
+            self._wf.CloseHandle(self._h)
+        except Exception:
+            pass
+
+
+def _ipc_connect() -> _IpcPipe | None:
+    import win32file
+    for path in DISCORD_IPC_PIPES:
+        try:
+            h = win32file.CreateFile(
+                path,
+                win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                0, None, win32file.OPEN_EXISTING, 0, None,
+            )
+            return _IpcPipe(h)
+        except Exception:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# RPC session (runs synchronously on dedicated thread)
+# ---------------------------------------------------------------------------
+
+def _rpc_loop(gen: int) -> None:
     import httpx
-    import websockets
 
     global _cmd_queue, _loop_ref
-    _loop_ref = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    _loop_ref = loop
     _cmd_queue = asyncio.Queue()
 
     while gen == _generation:
         delay = RECONNECT_DELAY
         try:
-            delay = await _connect_and_run(httpx, websockets)
+            delay = _connect_and_run(httpx, gen)
         except Exception as e:
             _log(f"RPC error: {e}")
 
@@ -264,80 +311,64 @@ async def _rpc_loop(gen: int) -> None:
             _state.in_voice = False
         if gen != _generation:
             break
-        await asyncio.sleep(delay)
+        time.sleep(delay)
     _log("old poller thread exiting")
 
 
-async def _connect_and_run(httpx, websockets) -> float:
-    ws = None
-    for port in DISCORD_RPC_PORTS:
-        uri = f"ws://127.0.0.1:{port}/?v=1&encoding=json"
-        try:
-            ws = await asyncio.wait_for(
-                websockets.connect(uri, origin="https://streamkit.discord.com"),
-                timeout=2.0,
-            )
-            _log(f" connected on port {port}")
-            break
-        except Exception:
-            continue
+def _connect_and_run(httpx, gen: int) -> float:
+    if not _load_token():
+        return AUTH_FAILURE_DELAY
 
-    if ws is None:
+    pipe = _ipc_connect()
+    if pipe is None:
         return RECONNECT_DELAY
 
     try:
-        return await _run_session(ws, httpx)
-    finally:
-        await ws.close()
+        pipe.send({"v": 1, "client_id": DISCORD_CLIENT_ID}, opcode=OP_HANDSHAKE)
+        ready = pipe.recv()
+        if ready.get("evt") != "READY":
+            _log(f"unexpected handshake: {ready}")
+            return RECONNECT_DELAY
+        _log("IPC connected")
 
+        access_token = _do_authenticate(pipe, httpx)
+        if not access_token:
+            return AUTH_FAILURE_DELAY
 
-async def _run_session(ws, httpx) -> float:
-    ready = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
-    if ready.get("evt") != "READY":
-        _log(f" unexpected handshake: {ready}")
+        pipe.send(_rpc_payload("SUBSCRIBE", {}, evt="VOICE_SETTINGS_UPDATE"))
+        pipe.send(_rpc_payload("SUBSCRIBE", {}, evt="VOICE_CHANNEL_SELECT"))
+        pipe.send(_rpc_payload("GET_SELECTED_VOICE_CHANNEL"))
+        pipe.send(_rpc_payload("GET_VOICE_SETTINGS"))
+
+        with _lock:
+            _state.connected = True
+            _state.last_update = time.monotonic()
+        _log("RPC subscribed")
+
+        _recv_loop_sync(pipe, httpx, gen)
         return RECONNECT_DELAY
-
-    access_token = await _authenticate(ws, httpx)
-    if not access_token:
-        return AUTH_FAILURE_DELAY
-
-    for evt in ("VOICE_SETTINGS_UPDATE", "VOICE_CHANNEL_SELECT"):
-        await ws.send(_rpc_msg("SUBSCRIBE", {}, evt=evt))
-
-    await ws.send(_rpc_msg("GET_SELECTED_VOICE_CHANNEL"))
-    await ws.send(_rpc_msg("GET_VOICE_SETTINGS"))
-
-    with _lock:
-        _state.connected = True
-        _state.last_update = time.monotonic()
-
-    _log(" RPC connected and subscribed")
-
-    recv_task = asyncio.create_task(_recv_loop(ws, httpx))
-    cmd_task = asyncio.create_task(_cmd_drain(ws))
-    poll_task = asyncio.create_task(_channel_poll(ws))
-
-    done, pending = await asyncio.wait(
-        [recv_task, cmd_task, poll_task],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for t in pending:
-        t.cancel()
-    for t in done:
-        if t.exception():
-            raise t.exception()
-    return RECONNECT_DELAY
+    finally:
+        pipe.close()
 
 
-async def _authenticate(ws, httpx) -> str | None:
+def _rpc_payload(cmd: str, args: dict | None = None, evt: str | None = None) -> dict:
+    msg: dict = {"cmd": cmd, "nonce": _nonce()}
+    if args is not None:
+        msg["args"] = args
+    if evt is not None:
+        msg["evt"] = evt
+    return msg
+
+
+def _do_authenticate(pipe: _IpcPipe, httpx) -> str | None:
     token_data = _load_token()
     if not token_data:
         _log("no token — run: uv run python -m behaviors.discord_auth")
         return None
 
     _log("trying cached token...")
-    await ws.send(_rpc_msg("AUTHENTICATE", {"access_token": token_data["access_token"]}))
-    resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+    pipe.send(_rpc_payload("AUTHENTICATE", {"access_token": token_data["access_token"]}))
+    resp = pipe.recv()
     if resp.get("evt") != "ERROR":
         _log("authenticated with cached token")
         return token_data["access_token"]
@@ -346,10 +377,22 @@ async def _authenticate(ws, httpx) -> str | None:
     return None
 
 
-async def _recv_loop(ws, httpx_mod) -> None:
-    while True:
-        raw = await ws.recv()
-        msg = json.loads(raw)
+def _recv_loop_sync(pipe: _IpcPipe, httpx_mod, gen: int) -> None:
+    last_poll = time.monotonic()
+    while gen == _generation:
+        # Drain any queued commands
+        while _cmd_queue and not _cmd_queue.empty():
+            try:
+                cmd, args = _cmd_queue.get_nowait()
+                pipe.send(_rpc_payload(cmd, args))
+            except Exception as e:
+                _log(f"send command error: {e}")
+
+        try:
+            msg = pipe.recv()
+        except Exception:
+            break
+
         cmd = msg.get("cmd")
         evt = msg.get("evt")
         data = msg.get("data") or {}
@@ -375,7 +418,7 @@ async def _recv_loop(ws, httpx_mod) -> None:
                     _state.users = []
                     _state.last_update = time.monotonic()
             else:
-                await ws.send(_rpc_msg("GET_SELECTED_VOICE_CHANNEL"))
+                pipe.send(_rpc_payload("GET_SELECTED_VOICE_CHANNEL"))
 
         elif cmd == "GET_SELECTED_VOICE_CHANNEL":
             if evt == "ERROR" or not data:
@@ -383,7 +426,7 @@ async def _recv_loop(ws, httpx_mod) -> None:
                     _state.in_voice = False
                     _state.last_update = time.monotonic()
             else:
-                await _update_voice_channel(data, httpx_mod)
+                _update_voice_channel(data, httpx_mod)
 
         elif cmd == "GET_VOICE_SETTINGS":
             if data:
@@ -392,8 +435,15 @@ async def _recv_loop(ws, httpx_mod) -> None:
                     _state.deafened = bool(data.get("deaf", False))
                     _state.last_update = time.monotonic()
 
+        now = time.monotonic()
+        if now - last_poll >= CHANNEL_POLL_INTERVAL:
+            last_poll = now
+            s = _snap()
+            if s.in_voice:
+                pipe.send(_rpc_payload("GET_SELECTED_VOICE_CHANNEL"))
 
-async def _update_voice_channel(data: dict, httpx_mod) -> None:
+
+def _update_voice_channel(data: dict, httpx_mod) -> None:
     guild = data.get("guild") or {}
     guild_id = str(guild.get("id", ""))
     guild_icon_hash = guild.get("icon_url") or guild.get("icon") or ""
@@ -419,47 +469,27 @@ async def _update_voice_channel(data: dict, httpx_mod) -> None:
 
     new_icon_key = f"{guild_id}:{guild_icon_hash}"
     if new_icon_key != prev_icon_key and guild_id and guild_icon_hash:
-        await _fetch_guild_icon(guild_id, guild_icon_hash, httpx_mod)
+        _fetch_guild_icon(guild_id, guild_icon_hash, httpx_mod)
 
 
-async def _fetch_guild_icon(guild_id: str, icon_hash: str, httpx_mod) -> None:
+def _fetch_guild_icon(guild_id: str, icon_hash: str, httpx_mod) -> None:
     ext = "gif" if icon_hash.startswith("a_") else "png"
     url = f"https://cdn.discordapp.com/icons/{guild_id}/{icon_hash}.{ext}?size=128"
     try:
-        async with httpx_mod.AsyncClient() as client:
-            resp = await client.get(url, timeout=5.0)
-            if resp.status_code == 200:
-                with _lock:
-                    _state.guild_icon_bytes = resp.content
-                    _state.last_update = time.monotonic()
-            else:
-                _log(f" guild icon fetch failed: {resp.status_code}")
+        resp = httpx_mod.get(url, timeout=5.0)
+        if resp.status_code == 200:
+            with _lock:
+                _state.guild_icon_bytes = resp.content
+                _state.last_update = time.monotonic()
+        else:
+            _log(f"guild icon fetch failed: {resp.status_code}")
     except Exception as e:
-        _log(f" guild icon fetch error: {e}")
-
-
-async def _cmd_drain(ws) -> None:
-    while True:
-        cmd, args = await _cmd_queue.get()
-        try:
-            await ws.send(_rpc_msg(cmd, args))
-        except Exception as e:
-            _log(f" send command error: {e}")
-
-
-async def _channel_poll(ws) -> None:
-    while True:
-        await asyncio.sleep(CHANNEL_POLL_INTERVAL)
-        s = _snap()
-        if s.in_voice:
-            await ws.send(_rpc_msg("GET_SELECTED_VOICE_CHANNEL"))
+        _log(f"guild icon fetch error: {e}")
 
 
 def _rpc_entry(gen: int) -> None:
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(_rpc_loop(gen))
+        _rpc_loop(gen)
     except Exception as e:
         _log(f"RPC client crashed: {e}")
 

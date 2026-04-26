@@ -11,4 +11,5 @@ from behaviors import (  # noqa: F401
     static_label,
     volume_control,
     wallpaper_tile,
+    workspace_launcher,
 )

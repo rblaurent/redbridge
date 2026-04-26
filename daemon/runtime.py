@@ -42,12 +42,18 @@ class DeckRuntime:
         self._stop = threading.Event()
         self._tick_thread: threading.Thread | None = None
         self._last_png: dict[str, str] = {}
+        self._overlay_strip: dict[int, Behavior] = {}
+        self._overlay_dial_rotate: dict[int, Behavior] = {}
+        self._overlay_dial_press: dict[int, Behavior] = {}
 
         self._brightness: int = 75
         self._screensaver_minutes: int = 15
         self._tick_hz: float = 4.0
         self._last_input: float = time.monotonic()
         self._asleep: bool = False
+
+        self._bus.subscribe("overlay:set", self._on_overlay_set)
+        self._bus.subscribe("overlay:clear", self._on_overlay_clear)
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -122,6 +128,9 @@ class DeckRuntime:
             self._dial_rotate.clear()
             self._dial_press.clear()
             self._strip.clear()
+            self._overlay_strip.clear()
+            self._overlay_dial_rotate.clear()
+            self._overlay_dial_press.clear()
             for k_str, a in layout.keys.items():
                 idx = int(k_str)
                 cls = get_behavior(a.behavior) or get_behavior("empty")
@@ -155,7 +164,10 @@ class DeckRuntime:
     def _render_all(self) -> None:
         with self._lock:
             keys = list(self._keys.items())
-            strip = list(self._strip.items())
+            strip = [
+                (idx, self._overlay_strip.get(idx, base))
+                for idx, base in self._strip.items()
+            ]
         for idx, b in keys:
             self._render_key(idx, b)
         for idx, b in strip:
@@ -215,6 +227,32 @@ class DeckRuntime:
         except RuntimeError:
             pass
 
+    # ---- overlay -------------------------------------------------------------
+
+    def _on_overlay_set(self, payload: dict[str, Any]) -> None:
+        strips = payload.get("strip", {})
+        with self._lock:
+            self._overlay_strip.update(strips)
+            self._overlay_dial_rotate.update(payload.get("dial_rotate", {}))
+            self._overlay_dial_press.update(payload.get("dial_press", {}))
+        for idx, b in strips.items():
+            self._render_strip(idx, b)
+
+    def _on_overlay_clear(self, payload: dict[str, Any]) -> None:
+        to_render: list[tuple[int, Behavior]] = []
+        with self._lock:
+            for idx in payload.get("strip", []):
+                self._overlay_strip.pop(idx, None)
+                base = self._strip.get(idx)
+                if base:
+                    to_render.append((idx, base))
+            for idx in payload.get("dial_rotate", []):
+                self._overlay_dial_rotate.pop(idx, None)
+            for idx in payload.get("dial_press", []):
+                self._overlay_dial_press.pop(idx, None)
+        for idx, b in to_render:
+            self._render_strip(idx, b)
+
     # ---- input ---------------------------------------------------------------
 
     def _on_key(self, _deck: Any, key: int, pressed: bool) -> None:
@@ -239,7 +277,7 @@ class DeckRuntime:
             if not value:
                 return
             with self._lock:
-                b = self._dial_press.get(dial)
+                b = self._overlay_dial_press.get(dial) or self._dial_press.get(dial)
             if b is None:
                 return
             try:
@@ -250,7 +288,7 @@ class DeckRuntime:
             delta = int(value)
             self._broadcast_input(f"dial:{dial}:rotate", "rotate", {"delta": delta})
             with self._lock:
-                b = self._dial_rotate.get(dial)
+                b = self._overlay_dial_rotate.get(dial) or self._dial_rotate.get(dial)
             if b is None:
                 return
             try:
@@ -283,7 +321,10 @@ class DeckRuntime:
 
             with self._lock:
                 keys = list(self._keys.items())
-                strip = list(self._strip.items())
+                strip = [
+                    (idx, self._overlay_strip.get(idx, base))
+                    for idx, base in self._strip.items()
+                ]
             for idx, b in keys:
                 try:
                     if b.tick():

@@ -55,6 +55,8 @@ DISCORD_IPC_PIPES = ["\\\\.\\pipe\\discord-ipc-" + str(i) for i in range(10)]
 RECONNECT_DELAY = 5.0
 AUTH_FAILURE_DELAY = 30.0
 CHANNEL_POLL_INTERVAL = 3.0
+VOLUME_OVERLAY_HOLD = 2.0
+VOLUME_ANIM_DURATION = 0.3
 
 DISCORD_BLURPLE = (88, 101, 242)
 DISCORD_GREEN = (87, 242, 135)
@@ -80,6 +82,14 @@ _user32.GetWindowTextW.restype = ctypes.c_int
 # ---------------------------------------------------------------------------
 
 @dataclass
+class _UserInfo:
+    user_id: str = ""
+    name: str = ""
+    avatar_hash: str = ""
+    avatar_bytes: bytes | None = None
+
+
+@dataclass
 class _DiscordState:
     connected: bool = False
     in_voice: bool = False
@@ -88,10 +98,11 @@ class _DiscordState:
     guild_id: str = ""
     guild_icon_hash: str = ""
     guild_icon_bytes: bytes | None = None
-    users: list[str] = field(default_factory=list)
+    users: list[_UserInfo] = field(default_factory=list)
     muted: bool = False
     deafened: bool = False
     volume: float = 0.0
+    volume_changed_at: float = 0.0
     last_update: float = 0.0
 
 
@@ -113,6 +124,7 @@ def _snap() -> _DiscordState:
             muted=_state.muted,
             deafened=_state.deafened,
             volume=_state.volume,
+            volume_changed_at=_state.volume_changed_at,
             last_update=_state.last_update,
         )
 
@@ -455,20 +467,29 @@ def _update_voice_channel(data: dict, httpx_mod, pipe: _IpcPipe | None = None) -
     guild_id = str(data.get("guild_id") or "")
 
     voice_states = data.get("voice_states") or []
-    users = []
+    users: list[_UserInfo] = []
     for vs in voice_states:
         nick = vs.get("nick") or ""
         user = vs.get("user") or {}
+        uid = str(user.get("id", ""))
         name = nick or user.get("global_name") or user.get("username") or "?"
-        users.append(name)
+        avatar = user.get("avatar") or ""
+        users.append(_UserInfo(user_id=uid, name=name, avatar_hash=avatar))
 
     with _lock:
         prev_guild_id = _state.guild_id
+        old_avatars = {u.user_id: u.avatar_bytes for u in _state.users if u.avatar_bytes}
+        for u in users:
+            u.avatar_bytes = old_avatars.get(u.user_id)
         _state.in_voice = True
         _state.channel_name = data.get("name") or ""
         _state.guild_id = guild_id
         _state.users = users
         _state.last_update = time.monotonic()
+
+    needs_avatar = [u for u in users if u.avatar_hash and not u.avatar_bytes]
+    if needs_avatar and httpx_mod:
+        _fetch_user_avatars(needs_avatar, httpx_mod)
 
     if guild_id and guild_id != prev_guild_id and pipe is not None:
         pipe.send(_rpc_payload("GET_GUILD", {"guild_id": guild_id}))
@@ -487,6 +508,23 @@ def _update_guild(data: dict, httpx_mod) -> None:
     if icon_hash and icon_hash != prev_icon:
         guild_id = _snap().guild_id
         _fetch_guild_icon(guild_id, icon_hash, httpx_mod)
+
+
+def _fetch_user_avatars(users: list[_UserInfo], httpx_mod) -> None:
+    for u in users:
+        ext = "gif" if u.avatar_hash.startswith("a_") else "png"
+        url = f"https://cdn.discordapp.com/avatars/{u.user_id}/{u.avatar_hash}.{ext}?size=64"
+        try:
+            resp = httpx_mod.get(url, timeout=5.0)
+            if resp.status_code == 200:
+                with _lock:
+                    for su in _state.users:
+                        if su.user_id == u.user_id:
+                            su.avatar_bytes = resp.content
+                            break
+                    _state.last_update = time.monotonic()
+        except Exception:
+            pass
 
 
 def _fetch_guild_icon(guild_id: str, icon_hash: str, httpx_mod) -> None:
@@ -551,6 +589,23 @@ def _round_corners(img: Image.Image, radius: int) -> Image.Image:
     return result
 
 
+def _ease_back_out(t: float) -> float:
+    t = t - 1
+    return 1 + t * t * (2.7 * t + 1.7)
+
+
+def _circle_crop(img: Image.Image) -> Image.Image:
+    sz = min(img.size)
+    img = img.resize((sz, sz), Image.LANCZOS)
+    ss = 4
+    mask = Image.new("L", (sz * ss, sz * ss), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, sz * ss - 1, sz * ss - 1), fill=255)
+    mask = mask.resize((sz, sz), Image.LANCZOS)
+    result = Image.new("RGB", (sz, sz), (0, 0, 0))
+    result.paste(img, mask=mask)
+    return result
+
+
 def _tint_image(img: Image.Image, color: tuple[int, int, int]) -> Image.Image:
     gray = img.convert("L")
     tinted = Image.new("RGB", img.size, color)
@@ -564,6 +619,9 @@ def _tint_image(img: Image.Image, color: tuple[int, int, int]) -> Image.Image:
 # Strip — channel info, users, mute/deafen status
 # ---------------------------------------------------------------------------
 
+BAR_BG = (42, 42, 42)
+
+
 @register
 class DiscordStrip(Behavior):
     type_id = "discord_strip"
@@ -575,28 +633,48 @@ class DiscordStrip(Behavior):
         super().__init__(target, config, bus)
         _ensure_poller()
         self._prev_key: tuple = ()
+        self._avatar_cache: dict[str, Image.Image] = {}
+        self._vol_overlay_active: bool = False
+        self._vol_anim_start: float = 0.0
+        self._vol_anim_dir: str = "in"
+
+    def _animating(self) -> bool:
+        if self._vol_anim_start == 0.0:
+            return False
+        return (time.monotonic() - self._vol_anim_start) < VOLUME_ANIM_DURATION
 
     def tick(self) -> bool:
         s = _snap()
+        now = time.monotonic()
+        showing = (
+            s.volume_changed_at > 0
+            and (now - s.volume_changed_at) < VOLUME_OVERLAY_HOLD
+        )
+        if showing and not self._vol_overlay_active:
+            self._vol_anim_start = now
+            self._vol_anim_dir = "in"
+        elif not showing and self._vol_overlay_active:
+            self._vol_anim_start = now
+            self._vol_anim_dir = "out"
+        self._vol_overlay_active = showing
+
+        if self._animating():
+            return True
+
+        avatar_ids = tuple((u.user_id, id(u.avatar_bytes)) for u in s.users)
         key = (s.connected, s.in_voice, s.channel_name, s.guild_name,
-               tuple(s.users), s.muted, s.deafened)
+               avatar_ids, showing, round(s.volume, 2))
         if key != self._prev_key:
             self._prev_key = key
             return True
         return False
 
-    def render(self) -> Image.Image | None:
+    def _render_channel(self, s: _DiscordState) -> Image.Image:
         w, h = self.size()
-        s = _snap()
         img = Image.new("RGB", (w, h), (0, 0, 0))
-        draw = ImageDraw.Draw(img)
-
         if not s.in_voice:
-            draw.text(
-                (w // 2, h // 2), "Not connected",
-                fill=DIM_GREY, font=font(14), anchor="mm",
-            )
             return img
+        draw = ImageDraw.Draw(img)
 
         tf = font(15)
         draw.text(
@@ -610,34 +688,94 @@ class DiscordStrip(Behavior):
             fill=(160, 160, 160), font=gf, anchor="lm",
         )
 
-        uf = font(11)
-        user_text = ", ".join(s.users[:5])
+        avatar_size = 30
+        avatar_y = h - avatar_size - 8
+        x = 8
+        for u in s.users[:5]:
+            av = self._get_avatar(u, avatar_size)
+            img.paste(av, (x, avatar_y))
+            x += avatar_size + 4
         if len(s.users) > 5:
-            user_text += f" +{len(s.users) - 5}"
-        draw.text(
-            (8, 54), _truncate(draw, user_text, uf, w - 16),
-            fill=(120, 120, 120), font=uf, anchor="lm",
-        )
-
-        if s.deafened:
-            status_color = DISCORD_ORANGE
-            status_text = "DEAFENED"
-        elif s.muted:
-            status_color = DISCORD_RED
-            status_text = "MUTED"
-        else:
-            status_color = DISCORD_GREEN
-            status_text = "CONNECTED"
-
-        sf = font(11)
-        dot_y = 78
-        draw.ellipse((8, dot_y - 4, 16, dot_y + 4), fill=status_color)
-        draw.text(
-            (20, dot_y), status_text,
-            fill=status_color, font=sf, anchor="lm",
-        )
-
+            draw.text(
+                (x + 2, avatar_y + avatar_size // 2),
+                f"+{len(s.users) - 5}",
+                fill=DIM_GREY, font=font(11), anchor="lm",
+            )
         return img
+
+    def _get_avatar(self, u: _UserInfo, size: int) -> Image.Image:
+        cache_key = f"{u.user_id}:{id(u.avatar_bytes)}"
+        if cache_key in self._avatar_cache:
+            return self._avatar_cache[cache_key]
+
+        if u.avatar_bytes:
+            try:
+                raw = Image.open(io.BytesIO(u.avatar_bytes)).convert("RGB")
+                av = _circle_crop(raw).resize((size, size), Image.LANCZOS)
+                self._avatar_cache[cache_key] = av
+                return av
+            except Exception:
+                pass
+
+        av = Image.new("RGB", (size, size), (0, 0, 0))
+        draw = ImageDraw.Draw(av)
+        draw.ellipse((0, 0, size - 1, size - 1), fill=DISCORD_BLURPLE)
+        initial = u.name[0].upper() if u.name else "?"
+        draw.text((size // 2, size // 2), initial, fill=(255, 255, 255),
+                  font=font(12), anchor="mm")
+        self._avatar_cache[cache_key] = av
+        return av
+
+    def _render_volume(self, s: _DiscordState) -> Image.Image:
+        w, h = self.size()
+        img = Image.new("RGB", (w, h), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        draw.text((8, 14), "Volume", fill=(255, 255, 255),
+                  font=font(15), anchor="lm")
+        draw.text((8, 34), "Discord", fill=(160, 160, 160),
+                  font=font(12), anchor="lm")
+        draw.text((8, 58), f"{int(s.volume * 100)}%",
+                  fill=(100, 100, 100), font=font(11), anchor="lm")
+
+        bx1, bx2, by, bh = 8, w - 8, 78, 6
+        bar_r = bh // 2
+        draw.rounded_rectangle((bx1, by, bx2, by + bh), bar_r, fill=BAR_BG)
+        vol = max(0.0, min(1.0, s.volume))
+        fill_x = bx1 + int((bx2 - bx1) * vol)
+        if fill_x > bx1 + bar_r:
+            draw.rounded_rectangle(
+                (bx1, by, fill_x, by + bh), bar_r, fill=DISCORD_BLURPLE,
+            )
+        return img
+
+    def render(self) -> Image.Image | None:
+        w, h = self.size()
+        s = _snap()
+        now = time.monotonic()
+
+        progress = 0.0
+        if self._vol_anim_start > 0:
+            t = min(1.0, (now - self._vol_anim_start) / VOLUME_ANIM_DURATION)
+            if self._vol_anim_dir == "in":
+                progress = _ease_back_out(t)
+            else:
+                progress = 1.0 - _ease_back_out(t)
+                if t >= 1.0:
+                    progress = 0.0
+        if self._vol_overlay_active and not self._animating():
+            progress = 1.0
+
+        if progress <= 0:
+            return self._render_channel(s)
+
+        img_ch = self._render_channel(s)
+        img_vol = self._render_volume(s)
+        canvas = Image.new("RGB", (w, h), (0, 0, 0))
+        y_off = int(h * progress)
+        canvas.paste(img_ch, (0, -y_off))
+        canvas.paste(img_vol, (0, h - y_off))
+        return canvas
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +909,16 @@ class DiscordVolume(Behavior):
 
     def on_rotate(self, delta: int) -> None:
         current = _get_discord_volume()
-        _set_discord_volume(current + delta * 0.02)
+        new_vol = max(0.0, min(1.0, current + delta * 0.02))
+        _set_discord_volume(new_vol)
+        now = time.monotonic()
+        with _lock:
+            _state.volume = new_vol
+            _state.volume_changed_at = now
+        self.bus.publish("tick:boost", {
+            "hz": 60.0,
+            "until": now + VOLUME_OVERLAY_HOLD + VOLUME_ANIM_DURATION + 0.1,
+        })
 
 
 # ---------------------------------------------------------------------------

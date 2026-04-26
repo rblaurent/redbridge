@@ -434,13 +434,7 @@ class SpotifyAlbumArt(Behavior):
         if self._art_img:
             return self._art_img.copy()
 
-        img = Image.new("RGB", (w, h), (30, 30, 30))
-        draw = ImageDraw.Draw(img)
-        draw.text(
-            (w // 2, h // 2), "♫",
-            fill=DIM_GREY, font=font(48), anchor="mm",
-        )
-        return img
+        return Image.new("RGB", (w, h), (0, 0, 0))
 
     def on_press(self) -> None:
         _press_media_key(VK_MEDIA_NEXT_TRACK)

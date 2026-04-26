@@ -31,6 +31,17 @@ from win_focus import focus_window
 
 _ASSETS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
 _TOKEN_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".discord_token")
+_LOG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".discord.log")
+
+
+def _log(msg: str) -> None:
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    print(f"[discord] {msg}", flush=True)
+    try:
+        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -177,9 +188,13 @@ def _load_token() -> dict | None:
         with open(_TOKEN_PATH, "r") as f:
             data = json.load(f)
         if data.get("access_token"):
+            _log(f"loaded token from {_TOKEN_PATH}")
             return data
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
+        _log(f"token file exists but no access_token key")
+    except FileNotFoundError:
+        _log(f"no token file at {_TOKEN_PATH}")
+    except Exception as e:
+        _log(f"token load error: {e}")
     return None
 
 
@@ -221,6 +236,7 @@ _poller_start_lock = threading.Lock()
 _cmd_queue: asyncio.Queue | None = None
 _loop_ref: asyncio.AbstractEventLoop | None = None
 _auth_prompted = False
+_generation = id(threading.Lock())
 
 
 def _enqueue_cmd(cmd: str, args: dict) -> None:
@@ -228,7 +244,7 @@ def _enqueue_cmd(cmd: str, args: dict) -> None:
         _loop_ref.call_soon_threadsafe(_cmd_queue.put_nowait, (cmd, args))
 
 
-async def _rpc_loop() -> None:
+async def _rpc_loop(gen: int) -> None:
     import httpx
     import websockets
 
@@ -236,17 +252,20 @@ async def _rpc_loop() -> None:
     _loop_ref = asyncio.get_event_loop()
     _cmd_queue = asyncio.Queue()
 
-    while True:
+    while gen == _generation:
         delay = RECONNECT_DELAY
         try:
             delay = await _connect_and_run(httpx, websockets)
         except Exception as e:
-            print(f"[discord] RPC error: {e}", flush=True)
+            _log(f"RPC error: {e}")
 
         with _lock:
             _state.connected = False
             _state.in_voice = False
+        if gen != _generation:
+            break
         await asyncio.sleep(delay)
+    _log("old poller thread exiting")
 
 
 async def _connect_and_run(httpx, websockets) -> float:
@@ -258,7 +277,7 @@ async def _connect_and_run(httpx, websockets) -> float:
                 websockets.connect(uri, origin="https://streamkit.discord.com"),
                 timeout=2.0,
             )
-            print(f"[discord] connected on port {port}", flush=True)
+            _log(f" connected on port {port}")
             break
         except Exception:
             continue
@@ -275,7 +294,7 @@ async def _connect_and_run(httpx, websockets) -> float:
 async def _run_session(ws, httpx) -> float:
     ready = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
     if ready.get("evt") != "READY":
-        print(f"[discord] unexpected handshake: {ready}", flush=True)
+        _log(f" unexpected handshake: {ready}")
         return RECONNECT_DELAY
 
     access_token = await _authenticate(ws, httpx)
@@ -292,7 +311,7 @@ async def _run_session(ws, httpx) -> float:
         _state.connected = True
         _state.last_update = time.monotonic()
 
-    print("[discord] RPC connected and subscribed", flush=True)
+    _log(" RPC connected and subscribed")
 
     recv_task = asyncio.create_task(_recv_loop(ws, httpx))
     cmd_task = asyncio.create_task(_cmd_drain(ws))
@@ -311,85 +330,20 @@ async def _run_session(ws, httpx) -> float:
 
 
 async def _authenticate(ws, httpx) -> str | None:
-    global _auth_prompted
-
     token_data = _load_token()
-    if token_data:
-        print("[discord] trying cached token...", flush=True)
-        await ws.send(_rpc_msg("AUTHENTICATE", {"access_token": token_data["access_token"]}))
-        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
-        if resp.get("evt") != "ERROR":
-            print("[discord] authenticated with cached token", flush=True)
-            return token_data["access_token"]
-        err = resp.get("data", {})
-        print(f"[discord] cached token rejected: {err.get('code')} {err.get('message')}", flush=True)
-        _delete_token()
-
-    if _auth_prompted:
-        print("[discord] already prompted once this session, skipping", flush=True)
+    if not token_data:
+        _log("no token — run: uv run python -m behaviors.discord_auth")
         return None
 
-    if not DISCORD_CLIENT_SECRET:
-        print("[discord] DISCORD_CLIENT_SECRET not set", flush=True)
-        return None
-
-    _auth_prompted = True
-    print("[discord] starting OAuth authorize flow (check Discord for prompt)...", flush=True)
-    await ws.send(_rpc_msg("AUTHORIZE", {
-        "client_id": DISCORD_CLIENT_ID,
-        "scopes": ["rpc", "rpc.voice.read", "rpc.voice.write"],
-    }))
-    auth_resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=120.0))
-    if auth_resp.get("evt") == "ERROR":
-        err = auth_resp.get("data", {})
-        print(f"[discord] authorize failed: {err.get('code')} {err.get('message')}", flush=True)
-        return None
-    code = auth_resp.get("data", {}).get("code")
-    if not code:
-        print(f"[discord] no auth code in response", flush=True)
-        return None
-    print("[discord] got auth code, exchanging for token...", flush=True)
-
-    # Try with and without redirect_uri — Discord app config may vary
-    for uri in (DISCORD_REDIRECT_URI, None):
-        payload = {
-            "grant_type": "authorization_code",
-            "code": code,
-            "client_id": DISCORD_CLIENT_ID,
-            "client_secret": DISCORD_CLIENT_SECRET,
-        }
-        if uri:
-            payload["redirect_uri"] = uri
-        async with httpx.AsyncClient() as client:
-            token_resp = await client.post(
-                "https://discord.com/api/oauth2/token", data=payload,
-            )
-        if token_resp.status_code == 200:
-            break
-        print(f"[discord] token exchange (redirect_uri={uri!r}): {token_resp.status_code} {token_resp.text}", flush=True)
-    else:
-        print("[discord] token exchange failed — check redirect URIs in Discord dev portal", flush=True)
-        return None
-
-    token_data = token_resp.json()
-    access_token = token_data["access_token"]
-    _save_token({
-        "access_token": access_token,
-        "refresh_token": token_data.get("refresh_token", ""),
-        "expires_at": time.time() + token_data.get("expires_in", 604800),
-    })
-    print(f"[discord] token saved to {_TOKEN_PATH}", flush=True)
-
-    await ws.send(_rpc_msg("AUTHENTICATE", {"access_token": access_token}))
+    _log("trying cached token...")
+    await ws.send(_rpc_msg("AUTHENTICATE", {"access_token": token_data["access_token"]}))
     resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
-    if resp.get("evt") == "ERROR":
-        err = resp.get("data", {})
-        print(f"[discord] authenticate failed: {err.get('code')} {err.get('message')}", flush=True)
-        _delete_token()
-        return None
-
-    print("[discord] authenticated via OAuth flow", flush=True)
-    return access_token
+    if resp.get("evt") != "ERROR":
+        _log("authenticated with cached token")
+        return token_data["access_token"]
+    err = resp.get("data", {})
+    _log(f"cached token rejected ({err.get('code')}): {err.get('message')}")
+    return None
 
 
 async def _recv_loop(ws, httpx_mod) -> None:
@@ -479,9 +433,9 @@ async def _fetch_guild_icon(guild_id: str, icon_hash: str, httpx_mod) -> None:
                     _state.guild_icon_bytes = resp.content
                     _state.last_update = time.monotonic()
             else:
-                print(f"[discord] guild icon fetch failed: {resp.status_code}", flush=True)
+                _log(f" guild icon fetch failed: {resp.status_code}")
     except Exception as e:
-        print(f"[discord] guild icon fetch error: {e}", flush=True)
+        _log(f" guild icon fetch error: {e}")
 
 
 async def _cmd_drain(ws) -> None:
@@ -490,7 +444,7 @@ async def _cmd_drain(ws) -> None:
         try:
             await ws.send(_rpc_msg(cmd, args))
         except Exception as e:
-            print(f"[discord] send command error: {e}", flush=True)
+            _log(f" send command error: {e}")
 
 
 async def _channel_poll(ws) -> None:
@@ -501,13 +455,13 @@ async def _channel_poll(ws) -> None:
             await ws.send(_rpc_msg("GET_SELECTED_VOICE_CHANNEL"))
 
 
-def _rpc_entry() -> None:
+def _rpc_entry(gen: int) -> None:
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(_rpc_loop())
+        loop.run_until_complete(_rpc_loop(gen))
     except Exception as e:
-        print(f"[discord] RPC client crashed: {e}", flush=True)
+        _log(f"RPC client crashed: {e}")
 
 
 def _ensure_poller() -> None:
@@ -516,8 +470,9 @@ def _ensure_poller() -> None:
         if _poller_started:
             return
         _poller_started = True
+        gen = _generation
         threading.Thread(
-            target=_rpc_entry, daemon=True, name="discord-rpc",
+            target=_rpc_entry, args=(gen,), daemon=True, name="discord-rpc",
         ).start()
 
 
@@ -746,7 +701,7 @@ class DiscordLogo(Behavior):
             try:
                 os.startfile("discord:")
             except Exception as e:
-                print(f"[discord] launch failed: {e}", flush=True)
+                _log(f" launch failed: {e}")
 
 
 # ---------------------------------------------------------------------------

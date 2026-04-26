@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from PIL import Image, ImageDraw
 
 from behaviors.base import Behavior, EventBus, Target, TargetKind
-from gfx import font, glow_bg
+from gfx import STRIP_BG, font, font_semibold, font_semilight, strip_bg
 from registry import register
 from sessions import SESSIONS, SessionInfo
 from win_focus import focus_window, get_console_title, is_window
@@ -39,7 +39,6 @@ CLAUDE_ORANGE = (193, 95, 60)
 STATUS_GREEN = (100, 180, 100)
 STATUS_RED = (210, 100, 80)
 DIM_GREY = (90, 90, 90)
-GLOW_PEAK = (50, 18, 10)
 
 DEFAULT_CONTEXT_MAX = 1_000_000
 TRANSCRIPT_READ_INTERVAL = 5.0
@@ -199,8 +198,9 @@ def _truncate(draw: ImageDraw.ImageDraw, text: str, f, max_w: int) -> str:
 # Carousel (strip)
 # ---------------------------------------------------------------------------
 
-ROW_H = 20
-VISIBLE_ROWS = 5
+ROW_H = 22
+VISIBLE_ROWS = 4
+ROW_START_Y = 6
 
 
 @register
@@ -231,34 +231,35 @@ class ClaudeSessionCarousel(Behavior):
         n = len(sessions)
         idx = _clamped_index(n)
 
-        img = glow_bg(w, h, GLOW_PEAK)
+        img = strip_bg(w, h)
         draw = ImageDraw.Draw(img)
+        draw.rectangle((0, 0, w, 2), fill=CLAUDE_ORANGE)
 
         if n == 0:
             return img
 
         scroll_top = max(0, min(idx - 1, n - VISIBLE_ROWS))
-        row_font = font(15)
+        row_font = font_semibold(13)
 
         for row_i in range(VISIBLE_ROWS):
             si = scroll_top + row_i
             if si >= n:
                 break
             s = sessions[si]
-            y = row_i * ROW_H
+            y = ROW_START_Y + row_i * ROW_H
             selected = si == idx
 
             if selected:
-                draw.rectangle((0, y, w, y + ROW_H - 1), fill=CLAUDE_ORANGE)
+                draw.rounded_rectangle((4, y, w - 4, y + ROW_H - 2), 4, fill=CLAUDE_ORANGE)
 
             dot_color = (255, 255, 255) if selected else _status_color(s.last_hook)
             dot_y = y + ROW_H // 2
-            draw.ellipse((6, dot_y - 3, 12, dot_y + 3), fill=dot_color)
+            draw.ellipse((10, dot_y - 4, 18, dot_y + 4), fill=dot_color)
 
-            text_color = (255, 255, 255) if selected else (190, 190, 190)
+            text_color = (255, 255, 255) if selected else (170, 170, 170)
             name = _workspace_name(s.cwd)
-            name = _truncate(draw, name, row_font, w - 22)
-            draw.text((18, y + ROW_H // 2 - 2), name, fill=text_color, font=row_font, anchor="lm")
+            name = _truncate(draw, name, row_font, w - 34)
+            draw.text((24, dot_y - 1), name, fill=text_color, font=row_font, anchor="lm")
 
         return img
 
@@ -300,8 +301,10 @@ class ClaudeSessionDetail(Behavior):
         n = len(sessions)
         idx = _clamped_index(n)
 
-        img = glow_bg(w, h, GLOW_PEAK)
+        img = strip_bg(w, h)
         draw = ImageDraw.Draw(img)
+        draw.rectangle((0, 0, w, 2), fill=CLAUDE_ORANGE)
+        draw.rectangle((0, 0, 2, h), fill=CLAUDE_ORANGE)
 
         if n == 0:
             return img
@@ -310,31 +313,23 @@ class ClaudeSessionDetail(Behavior):
         meta = _read_transcript_meta(s.session_id, s.transcript_path)
         color = _status_color(s.last_hook)
 
-        # Accent bar
-        draw.rectangle((0, 0, 1, h), fill=CLAUDE_ORANGE)
-
-        # Session title
         title_text = get_console_title(s.hwnd) or _workspace_name(s.cwd)
-        tf = font(15)
-        title_text = _truncate(draw, title_text, tf, w - 16)
-        draw.text((8, 14), title_text, fill=(255, 255, 255), font=tf, anchor="lm")
+        tf = font_semibold(14)
+        title_text = _truncate(draw, title_text, tf, w - 24)
+        draw.text((12, 22), title_text, fill=(255, 255, 255), font=tf, anchor="lm")
 
-        # Status
-        sf = font(12)
-        draw.text((8, 34), _status_text(s), fill=color, font=sf, anchor="lm")
+        draw.text((12, 42), _status_text(s), fill=color, font=font(11), anchor="lm")
 
-        # Tool name
         if s.tool_name and s.last_hook in THINKING_HOOKS:
-            draw.text((8, 58), f"Tool: {s.tool_name}",
-                       fill=(100, 100, 100), font=font(11), anchor="lm")
+            draw.text((12, 60), f"Tool: {s.tool_name}",
+                       fill=(70, 70, 70), font=font_semilight(10), anchor="lm")
 
-        # Context progress bar
         if meta.context_used > 0:
             pct = min(1.0, meta.context_used / meta.context_max)
             bar_fg = CLAUDE_ORANGE if pct < 0.8 else STATUS_RED
-            bx1, bx2, by, bh = 8, w - 8, 78, 6
+            bx1, bx2, by, bh = 12, w - 10, 82, 8
             bar_r = bh // 2
-            draw.rounded_rectangle((bx1, by, bx2, by + bh), bar_r, fill=(42, 42, 42))
+            draw.rounded_rectangle((bx1, by, bx2, by + bh), bar_r, fill=(30, 30, 32))
             fill_x = bx1 + int((bx2 - bx1) * pct)
             if fill_x > bx1 + bar_r:
                 draw.rounded_rectangle(

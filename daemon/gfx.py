@@ -4,46 +4,30 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw, ImageFont
 
-GLOW_HEIGHT_FRAC = 0.45
-
-_glow_cache: dict[tuple, Image.Image] = {}
+STRIP_BG = (10, 10, 12)
 
 
-def glow_bg(w: int, h: int, peak: tuple[int, int, int]) -> Image.Image:
-    key = (w, h, peak)
-    cached = _glow_cache.get(key)
-    if cached is not None:
-        return cached.copy()
+def strip_bg(w: int, h: int) -> Image.Image:
+    return Image.new("RGB", (w, h), STRIP_BG)
 
-    img = Image.new("RGB", (w, h), (0, 0, 0))
-    glow_rows = int(h * GLOW_HEIGHT_FRAC)
-    draw = ImageDraw.Draw(img)
-    for y in range(glow_rows):
-        t = y / max(glow_rows - 1, 1)
-        t2 = t * t
-        r = int(peak[0] * t2)
-        g = int(peak[1] * t2)
-        b = int(peak[2] * t2)
-        row_y = h - glow_rows + y
-        draw.line([(0, row_y), (w - 1, row_y)], fill=(r, g, b))
-    _glow_cache[key] = img.copy()
-    return img
+_FONT_CACHE: dict[tuple[str, int], ImageFont.ImageFont] = {}
 
-_FONT_CACHE: dict[int, ImageFont.ImageFont] = {}
-_FONT_CANDIDATES = [
-    r"C:\Windows\Fonts\segoeui.ttf",
-    r"C:\Windows\Fonts\arial.ttf",
-]
+_FONT_FAMILIES: dict[str, list[str]] = {
+    "regular": [r"C:\Windows\Fonts\segoeui.ttf", r"C:\Windows\Fonts\arial.ttf"],
+    "semibold": [r"C:\Windows\Fonts\seguisb.ttf", r"C:\Windows\Fonts\segoeui.ttf"],
+    "semilight": [r"C:\Windows\Fonts\segoeuisl.ttf", r"C:\Windows\Fonts\segoeui.ttf"],
+}
 
 
-def font(size: int) -> ImageFont.ImageFont:
-    cached = _FONT_CACHE.get(size)
+def _load_font(weight: str, size: int) -> ImageFont.ImageFont:
+    key = (weight, size)
+    cached = _FONT_CACHE.get(key)
     if cached is not None:
         return cached
-    for path in _FONT_CANDIDATES:
+    for path in _FONT_FAMILIES.get(weight, _FONT_FAMILIES["regular"]):
         try:
             f = ImageFont.truetype(path, size)
-            _FONT_CACHE[size] = f
+            _FONT_CACHE[key] = f
             return f
         except OSError:
             continue
@@ -51,5 +35,17 @@ def font(size: int) -> ImageFont.ImageFont:
         f = ImageFont.load_default(size=size)
     except TypeError:
         f = ImageFont.load_default()
-    _FONT_CACHE[size] = f
+    _FONT_CACHE[key] = f
     return f
+
+
+def font(size: int) -> ImageFont.ImageFont:
+    return _load_font("regular", size)
+
+
+def font_semibold(size: int) -> ImageFont.ImageFont:
+    return _load_font("semibold", size)
+
+
+def font_semilight(size: int) -> ImageFont.ImageFont:
+    return _load_font("semilight", size)

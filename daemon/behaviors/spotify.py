@@ -20,10 +20,10 @@ import time
 from ctypes import wintypes
 from dataclasses import dataclass
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageDraw
 
 from behaviors.base import Behavior, EventBus, Target, TargetKind
-from gfx import font, glow_bg
+from gfx import STRIP_BG, font, font_semibold, font_semilight, strip_bg
 from registry import register
 from win_focus import focus_window
 
@@ -35,7 +35,7 @@ _ASSETS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
 
 SPOTIFY_GREEN = (30, 185, 84)
 DIM_GREY = (80, 80, 80)
-BAR_BG = (42, 42, 42)
+BAR_BG = (30, 30, 32)
 POLL_INTERVAL = 0.5
 VOLUME_OVERLAY_HOLD = 2.0
 VOLUME_ANIM_DURATION = 0.3
@@ -45,7 +45,6 @@ VK_MEDIA_NEXT_TRACK = 0xB0
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 
-GLOW_PEAK = (10, 56, 28)
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -378,30 +377,32 @@ class SpotifyStrip(Behavior):
 
     def _render_track(self, s: _SpotifyState) -> Image.Image:
         w, h = self.size()
-        img = Image.new("RGB", (w, h), (0, 0, 0))
+        img = Image.new("RGB", (w, h), STRIP_BG)
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((0, 0, w, 2), fill=SPOTIFY_GREEN)
+
         if not s.active or not s.track:
             return img
-        draw = ImageDraw.Draw(img)
 
-        tf = font(15)
+        tf = font_semibold(15)
         draw.text(
-            (8, 14), _truncate(draw, s.track, tf, w - 16),
+            (10, 22), _truncate(draw, s.track, tf, w - 20),
             fill=(255, 255, 255), font=tf, anchor="lm",
         )
 
-        af = font(12)
-        draw.text(
-            (8, 34), _truncate(draw, s.artist, af, w - 16),
-            fill=(160, 160, 160), font=af, anchor="lm",
-        )
-
+        af = font(11)
         time_str = f"{_format_ms(s.position_ms)} / {_format_ms(s.duration_ms)}"
+        time_w = draw.textlength(time_str, font=font_semilight(10))
         draw.text(
-            (8, 58), time_str,
-            fill=(100, 100, 100), font=font(11), anchor="lm",
+            (10, 42), _truncate(draw, s.artist, af, w - 24 - time_w),
+            fill=(130, 130, 130), font=af, anchor="lm",
+        )
+        draw.text(
+            (w - 10, 42), time_str,
+            fill=(70, 70, 70), font=font_semilight(10), anchor="rm",
         )
 
-        bx1, bx2, by, bh = 8, w - 8, 78, 6
+        bx1, bx2, by, bh = 10, w - 10, 82, 8
         bar_r = bh // 2
         draw.rounded_rectangle((bx1, by, bx2, by + bh), bar_r, fill=BAR_BG)
         if s.duration_ms > 0:
@@ -415,23 +416,24 @@ class SpotifyStrip(Behavior):
 
     def _render_volume(self, s: _SpotifyState) -> Image.Image:
         w, h = self.size()
-        img = Image.new("RGB", (w, h), (0, 0, 0))
+        img = Image.new("RGB", (w, h), STRIP_BG)
         draw = ImageDraw.Draw(img)
+        draw.rectangle((0, 0, w, 2), fill=SPOTIFY_GREEN)
 
         draw.text(
-            (8, 14), "Volume",
-            fill=(255, 255, 255), font=font(15), anchor="lm",
+            (10, 22), "Volume",
+            fill=(255, 255, 255), font=font_semibold(15), anchor="lm",
         )
         draw.text(
-            (8, 34), "Spotify",
-            fill=(160, 160, 160), font=font(12), anchor="lm",
+            (10, 42), "Spotify",
+            fill=(130, 130, 130), font=font(11), anchor="lm",
         )
         draw.text(
-            (8, 58), f"{int(s.volume * 100)}%",
-            fill=(100, 100, 100), font=font(11), anchor="lm",
+            (w - 10, 42), f"{int(s.volume * 100)}%",
+            fill=(70, 70, 70), font=font_semilight(10), anchor="rm",
         )
 
-        bx1, bx2, by, bh = 8, w - 8, 78, 6
+        bx1, bx2, by, bh = 10, w - 10, 82, 8
         bar_r = bh // 2
         draw.rounded_rectangle((bx1, by, bx2, by + bh), bar_r, fill=BAR_BG)
         vol = max(0.0, min(1.0, s.volume))
@@ -459,18 +461,16 @@ class SpotifyStrip(Behavior):
         if self._vol_overlay_active and not self._animating():
             progress = 1.0
 
-        bg = glow_bg(w, h, GLOW_PEAK)
-
         if progress <= 0:
-            return ImageChops.lighter(bg, self._render_track(s))
+            return self._render_track(s)
 
         img_track = self._render_track(s)
         img_vol = self._render_volume(s)
-        content = Image.new("RGB", (w, h), (0, 0, 0))
+        content = Image.new("RGB", (w, h), STRIP_BG)
         y_off = int(h * progress)
         content.paste(img_track, (0, -y_off))
         content.paste(img_vol, (0, h - y_off))
-        return ImageChops.lighter(bg, content)
+        return content
 
 
 # ---------------------------------------------------------------------------

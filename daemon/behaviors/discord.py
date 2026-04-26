@@ -23,10 +23,10 @@ import uuid
 from ctypes import wintypes
 from dataclasses import dataclass, field
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageDraw
 
 from behaviors.base import Behavior, EventBus, Target, TargetKind
-from gfx import font, glow_bg
+from gfx import STRIP_BG, font, font_semibold, font_semilight, strip_bg
 from registry import register
 from win_focus import focus_window
 
@@ -63,7 +63,6 @@ DISCORD_GREEN = (87, 242, 135)
 DISCORD_RED = (237, 66, 69)
 DISCORD_ORANGE = (250, 168, 26)
 DIM_GREY = (80, 80, 80)
-GLOW_PEAK = (14, 16, 50)
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -622,7 +621,7 @@ def _tint_image(img: Image.Image, color: tuple[int, int, int]) -> Image.Image:
 # Strip — channel info, users, mute/deafen status
 # ---------------------------------------------------------------------------
 
-BAR_BG = (42, 42, 42)
+BAR_BG = (30, 30, 32)
 
 
 @register
@@ -674,26 +673,28 @@ class DiscordStrip(Behavior):
 
     def _render_channel(self, s: _DiscordState) -> Image.Image:
         w, h = self.size()
-        img = Image.new("RGB", (w, h), (0, 0, 0))
+        img = Image.new("RGB", (w, h), STRIP_BG)
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((0, 0, w, 2), fill=DISCORD_BLURPLE)
+
         if not s.in_voice:
             return img
-        draw = ImageDraw.Draw(img)
 
-        tf = font(15)
+        tf = font_semibold(14)
         draw.text(
-            (8, 14), _truncate(draw, s.channel_name, tf, w - 16),
+            (10, 22), _truncate(draw, s.channel_name, tf, w - 20),
             fill=(255, 255, 255), font=tf, anchor="lm",
         )
 
-        gf = font(12)
+        gf = font(11)
         draw.text(
-            (8, 34), _truncate(draw, s.guild_name, gf, w - 16),
-            fill=(160, 160, 160), font=gf, anchor="lm",
+            (10, 42), _truncate(draw, s.guild_name, gf, w - 20),
+            fill=(120, 120, 120), font=gf, anchor="lm",
         )
 
-        avatar_size = 30
-        avatar_y = h - avatar_size - 8
-        x = 8
+        avatar_size = 28
+        avatar_y = 62
+        x = 10
         for u in s.users[:5]:
             av = self._get_avatar(u, avatar_size)
             img.paste(av, (x, avatar_y))
@@ -731,17 +732,18 @@ class DiscordStrip(Behavior):
 
     def _render_volume(self, s: _DiscordState) -> Image.Image:
         w, h = self.size()
-        img = Image.new("RGB", (w, h), (0, 0, 0))
+        img = Image.new("RGB", (w, h), STRIP_BG)
         draw = ImageDraw.Draw(img)
+        draw.rectangle((0, 0, w, 2), fill=DISCORD_BLURPLE)
 
-        draw.text((8, 14), "Volume", fill=(255, 255, 255),
-                  font=font(15), anchor="lm")
-        draw.text((8, 34), "Discord", fill=(160, 160, 160),
-                  font=font(12), anchor="lm")
-        draw.text((8, 58), f"{int(s.volume * 100)}%",
-                  fill=(100, 100, 100), font=font(11), anchor="lm")
+        draw.text((10, 22), "Volume", fill=(255, 255, 255),
+                  font=font_semibold(15), anchor="lm")
+        draw.text((10, 42), "Discord", fill=(130, 130, 130),
+                  font=font(11), anchor="lm")
+        draw.text((w - 10, 42), f"{int(s.volume * 100)}%",
+                  fill=(70, 70, 70), font=font_semilight(10), anchor="rm")
 
-        bx1, bx2, by, bh = 8, w - 8, 78, 6
+        bx1, bx2, by, bh = 10, w - 10, 82, 8
         bar_r = bh // 2
         draw.rounded_rectangle((bx1, by, bx2, by + bh), bar_r, fill=BAR_BG)
         vol = max(0.0, min(1.0, s.volume))
@@ -769,18 +771,16 @@ class DiscordStrip(Behavior):
         if self._vol_overlay_active and not self._animating():
             progress = 1.0
 
-        bg = glow_bg(w, h, GLOW_PEAK)
-
         if progress <= 0:
-            return ImageChops.lighter(bg, self._render_channel(s))
+            return self._render_channel(s)
 
         img_ch = self._render_channel(s)
         img_vol = self._render_volume(s)
-        content = Image.new("RGB", (w, h), (0, 0, 0))
+        content = Image.new("RGB", (w, h), STRIP_BG)
         y_off = int(h * progress)
         content.paste(img_ch, (0, -y_off))
         content.paste(img_vol, (0, h - y_off))
-        return ImageChops.lighter(bg, content)
+        return content
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ import threading
 from PIL import Image, ImageDraw
 
 from behaviors.base import Behavior, EventBus, Target, TargetKind
-from gfx import font, glow_bg
+from gfx import font, font_semibold, font_semilight, strip_bg
 from registry import register
 
 PROJECTS_ROOT = r"T:\Projects"
@@ -22,9 +22,9 @@ _ASSETS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
 
 CLAUDE_ORANGE = (193, 95, 60)
 DIM_GREY = (90, 90, 90)
-GLOW_PEAK = (50, 18, 10)
-ROW_H = 20
-VISIBLE_ROWS = 5
+ROW_H = 22
+VISIBLE_ROWS = 4
+ROW_START_Y = 6
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -227,35 +227,35 @@ class _WorkspaceCarousel(Behavior):
         n = len(ws)
         idx = max(0, min(_get_selected(), n - 1)) if n else 0
 
-        img = glow_bg(w, h, GLOW_PEAK)
+        img = strip_bg(w, h)
         draw = ImageDraw.Draw(img)
+        draw.rectangle((0, 0, w, 2), fill=CLAUDE_ORANGE)
 
         if n == 0:
-            f = font(14)
-            draw.text((w // 2, h // 2), "No projects", fill=(80, 80, 80),
-                       font=f, anchor="mm")
+            draw.text((w // 2, h // 2), "No projects", fill=(70, 70, 70),
+                       font=font(14), anchor="mm")
             return img
 
         scroll_top = max(0, min(idx - 1, n - VISIBLE_ROWS))
-        row_font = font(15)
+        row_font = font_semibold(13)
 
         for row_i in range(VISIBLE_ROWS):
             si = scroll_top + row_i
             if si >= n:
                 break
-            y = row_i * ROW_H
+            y = ROW_START_Y + row_i * ROW_H
             selected = si == idx
 
             if selected:
-                draw.rectangle((0, y, w, y + ROW_H - 1), fill=CLAUDE_ORANGE)
+                draw.rounded_rectangle((4, y, w - 4, y + ROW_H - 2), 4, fill=CLAUDE_ORANGE)
 
             dot_color = (255, 255, 255) if selected else DIM_GREY
             dot_y = y + ROW_H // 2
-            draw.ellipse((6, dot_y - 3, 12, dot_y + 3), fill=dot_color)
+            draw.ellipse((10, dot_y - 4, 18, dot_y + 4), fill=dot_color)
 
-            text_color = (255, 255, 255) if selected else (190, 190, 190)
-            name = _truncate(draw, ws[si], row_font, w - 22)
-            draw.text((18, y + ROW_H // 2 - 2), name, fill=text_color,
+            text_color = (255, 255, 255) if selected else (170, 170, 170)
+            name = _truncate(draw, ws[si], row_font, w - 34)
+            draw.text((24, dot_y - 1), name, fill=text_color,
                        font=row_font, anchor="lm")
 
         return img
@@ -288,29 +288,28 @@ class _WorkspaceDetail(Behavior):
         n = len(ws)
         idx = max(0, min(_get_selected(), n - 1)) if n else 0
 
-        img = glow_bg(w, h, GLOW_PEAK)
+        img = strip_bg(w, h)
         draw = ImageDraw.Draw(img)
+        draw.rectangle((0, 0, w, 2), fill=CLAUDE_ORANGE)
+        draw.rectangle((0, 0, 2, h), fill=CLAUDE_ORANGE)
 
         if n == 0:
-            f = font(14)
             draw.text((w // 2, h // 2), "No projects found",
-                       fill=(80, 80, 80), font=f, anchor="mm")
+                       fill=(70, 70, 70), font=font(14), anchor="mm")
             return img
 
         folder = ws[idx]
 
-        draw.rectangle((0, 0, 3, h), fill=CLAUDE_ORANGE)
+        tf = font_semibold(14)
+        name = _truncate(draw, folder, tf, w - 24)
+        draw.text((12, 22), name, fill=(255, 255, 255), font=tf, anchor="lm")
 
-        nf = font(15)
-        name = _truncate(draw, folder, nf, w - 16)
-        draw.text((10, 14), name, fill=(255, 255, 255), font=nf, anchor="lm")
+        pf = font(11)
+        path_text = _truncate(draw, os.path.join(PROJECTS_ROOT, folder), pf, w - 24)
+        draw.text((12, 42), path_text, fill=(120, 120, 120), font=pf, anchor="lm")
 
-        pf = font(12)
-        path_text = _truncate(draw, os.path.join(PROJECTS_ROOT, folder), pf, w - 16)
-        draw.text((10, 38), path_text, fill=(120, 120, 120), font=pf, anchor="lm")
-
-        hf = font(11)
-        draw.text((10, h - 16), "Press dial to launch", fill=DIM_GREY, font=hf)
+        draw.text((12, h - 16), "Press dial to launch",
+                   fill=(70, 70, 70), font=font_semilight(10))
 
         return img
 

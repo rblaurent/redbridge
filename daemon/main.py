@@ -236,8 +236,9 @@ async def hook_event(payload: dict[str, Any]) -> dict[str, str]:
         + (f"[w={c.get('hwnd')}]" if c.get("hwnd") else "")
         for c in chain
     )
+    cwd = payload.get("cwd", "")
     print(
-        f"[hook] {evt.hook!r} session={evt.session_id[:8]} hwnd={evt.hwnd}",
+        f"[hook] {evt.hook!r} session={evt.session_id[:8]} hwnd={evt.hwnd} cwd={cwd!r}",
         flush=True,
     )
     if chain:

@@ -58,6 +58,7 @@ class SessionInfo:
     last_seen: float
     cwd: str = ""
     tool_name: str = ""
+    transcript_path: str = ""
 
 
 class SessionStore:
@@ -75,12 +76,14 @@ class SessionStore:
             hwnd = evt.hwnd or (prev.hwnd if prev else None)
             cwd = str(evt.raw.get("cwd") or (prev.cwd if prev else "") or "")
             tool_name = str(evt.raw.get("tool_name") or (prev.tool_name if prev else "") or "")
+            transcript_path = str(evt.raw.get("transcript_path") or (prev.transcript_path if prev else "") or "")
             if evt.hook == "SessionEnd":
                 self._sessions.pop(evt.session_id, None)
             else:
                 self._sessions[evt.session_id] = SessionInfo(
                     evt.session_id, evt.hook, hwnd, evt.received_at,
                     cwd=cwd, tool_name=tool_name,
+                    transcript_path=transcript_path,
                 )
 
     def snapshot(self) -> list[SessionInfo]:

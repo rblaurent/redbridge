@@ -10,8 +10,11 @@ Four behaviors that work together via shared module-level state:
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
+from dataclasses import dataclass
 
 from PIL import Image, ImageDraw
 
@@ -27,6 +30,7 @@ from win_focus import focus_window, is_window
 # ---------------------------------------------------------------------------
 
 STALE_AFTER_SECONDS = 30 * 60
+DONE_STALE_SECONDS = 3 * 60
 
 THINKING_HOOKS = frozenset({"UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStop"})
 WAITING_HOOKS = frozenset({"Notification", "Stop"})
@@ -35,6 +39,9 @@ CLAUDE_ORANGE = (193, 95, 60)
 STATUS_GREEN = (100, 180, 100)
 STATUS_RED = (210, 100, 80)
 DIM_GREY = (90, 90, 90)
+
+DEFAULT_CONTEXT_MAX = 1_000_000
+TRANSCRIPT_READ_INTERVAL = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +64,72 @@ def _set_selected(idx: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Transcript metadata cache
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _TranscriptMeta:
+    title: str = ""
+    context_used: int = 0
+    context_max: int = DEFAULT_CONTEXT_MAX
+    last_read: float = 0.0
+
+
+_meta_lock = threading.Lock()
+_meta_cache: dict[str, _TranscriptMeta] = {}
+
+
+def _read_transcript_meta(session_id: str, transcript_path: str) -> _TranscriptMeta:
+    with _meta_lock:
+        cached = _meta_cache.get(session_id)
+        if cached and (time.monotonic() - cached.last_read) < TRANSCRIPT_READ_INTERVAL:
+            return cached
+
+    meta = _TranscriptMeta(last_read=time.monotonic())
+    if cached:
+        meta.title = cached.title
+        meta.context_used = cached.context_used
+        meta.context_max = cached.context_max
+
+    if not transcript_path or not os.path.isfile(transcript_path):
+        with _meta_lock:
+            _meta_cache[session_id] = meta
+        return meta
+
+    try:
+        size = os.path.getsize(transcript_path)
+        read_bytes = min(size, 64 * 1024)
+        with open(transcript_path, "rb") as f:
+            f.seek(max(0, size - read_bytes))
+            tail = f.read().decode("utf-8", "replace")
+        lines = tail.strip().split("\n")
+        for line in reversed(lines):
+            try:
+                d = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            t = d.get("type")
+            if t == "custom-title" and not meta.title:
+                meta.title = d.get("customTitle", "")
+            elif t == "assistant" and meta.context_used == 0:
+                usage = (d.get("message") or {}).get("usage")
+                if usage:
+                    meta.context_used = (
+                        usage.get("input_tokens", 0)
+                        + usage.get("cache_creation_input_tokens", 0)
+                        + usage.get("cache_read_input_tokens", 0)
+                    )
+            if meta.title and meta.context_used:
+                break
+    except Exception as e:
+        print(f"[session_monitor] transcript read error: {e}", flush=True)
+
+    with _meta_lock:
+        _meta_cache[session_id] = meta
+    return meta
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -70,12 +143,18 @@ def _workspace_name(cwd: str) -> str:
 def _sorted_sessions() -> list[SessionInfo]:
     now = time.monotonic()
     cutoff = now - STALE_AFTER_SECONDS
+    done_cutoff = now - DONE_STALE_SECONDS
     alive: list[SessionInfo] = []
     for s in SESSIONS.snapshot():
+        if not s.hwnd:
+            continue
         if s.last_seen < cutoff:
             SESSIONS.drop(s.session_id)
             continue
-        if s.hwnd and not is_window(s.hwnd):
+        if s.last_hook in WAITING_HOOKS and s.last_seen < done_cutoff:
+            SESSIONS.drop(s.session_id)
+            continue
+        if not is_window(s.hwnd):
             SESSIONS.drop(s.session_id)
             continue
         alive.append(s)
@@ -131,13 +210,27 @@ def _truncate(draw: ImageDraw.ImageDraw, text: str, f, max_w: int) -> str:
     return "..."
 
 
+def _draw_context_ring(
+    draw: ImageDraw.ImageDraw,
+    cx: int, cy: int, radius: int,
+    pct: float,
+    fg: tuple[int, int, int],
+    bg: tuple[int, int, int] = (50, 50, 50),
+    width: int = 3,
+) -> None:
+    bbox = (cx - radius, cy - radius, cx + radius, cy + radius)
+    draw.arc(bbox, 0, 360, fill=bg, width=width)
+    if pct > 0:
+        sweep = min(pct, 1.0) * 360
+        draw.arc(bbox, -90, -90 + sweep, fill=fg, width=width)
+
+
 # ---------------------------------------------------------------------------
 # Carousel (strip)
 # ---------------------------------------------------------------------------
 
-ROW_H = 22
-VISIBLE_ROWS = 4
-FOOTER_H = 12
+ROW_H = 20
+VISIBLE_ROWS = 5
 
 
 @register
@@ -198,14 +291,7 @@ class ClaudeSessionCarousel(Behavior):
             text_color = (255, 255, 255) if selected else (190, 190, 190)
             name = _workspace_name(s.cwd)
             name = _truncate(draw, name, row_font, w - 22)
-            draw.text((18, y + 3), name, fill=text_color, font=row_font)
-
-        # Footer
-        footer_y = VISIBLE_ROWS * ROW_H
-        draw.line((0, footer_y, w, footer_y), fill=(40, 40, 40))
-        ff = font(11)
-        label = f"{n} session{'s' if n != 1 else ''}"
-        draw.text((6, footer_y + 2), label, fill=(100, 100, 100), font=ff)
+            draw.text((18, y + ROW_H // 2), name, fill=text_color, font=row_font, anchor="lm")
 
         return img
 
@@ -230,7 +316,9 @@ class ClaudeSessionDetail(Behavior):
         idx = _clamped_index(len(sessions))
         if sessions:
             s = sessions[idx]
-            key = (s.session_id, s.last_hook, s.cwd, s.tool_name, idx)
+            meta = _read_transcript_meta(s.session_id, s.transcript_path)
+            key = (s.session_id, s.last_hook, s.cwd, s.tool_name, idx,
+                   meta.title, meta.context_used)
         else:
             key = ()
         if key != self._prev_key:
@@ -254,29 +342,39 @@ class ClaudeSessionDetail(Behavior):
             return img
 
         s = sessions[idx]
+        meta = _read_transcript_meta(s.session_id, s.transcript_path)
         color = _status_color(s.last_hook)
 
         # Accent bar
         draw.rectangle((0, 0, 3, h), fill=color)
 
-        # Workspace name
-        nf = font(18)
-        name = _workspace_name(s.cwd)
-        name = _truncate(draw, name, nf, w - 16)
-        draw.text((10, 8), name, fill=(255, 255, 255), font=nf)
+        # Session title (primary heading)
+        title_text = meta.title or _workspace_name(s.cwd)
+        nf = font(15)
+        title_text = _truncate(draw, title_text, nf, w - 16)
+        draw.text((10, 10), title_text, fill=(255, 255, 255), font=nf, anchor="lm")
 
         # Status
-        sf = font(15)
-        draw.text((10, 36), _status_text(s), fill=color, font=sf)
+        sf = font(14)
+        draw.text((10, 32), _status_text(s), fill=color, font=sf, anchor="lm")
 
         # Tool name
         if s.tool_name and s.last_hook in THINKING_HOOKS:
-            tf = font(13)
-            draw.text((10, 58), f"Tool: {s.tool_name}", fill=(120, 120, 120), font=tf)
+            tlf = font(12)
+            draw.text((10, 52), f"Tool: {s.tool_name}", fill=(120, 120, 120), font=tlf, anchor="lm")
 
-        # Time ago
+        # Context ring + time ago (bottom right area)
+        if meta.context_used > 0:
+            pct = meta.context_used / meta.context_max
+            ring_r = 12
+            ring_cx = w - ring_r - 8
+            ring_cy = h - ring_r - 8
+            ring_fg = CLAUDE_ORANGE if pct < 0.8 else STATUS_RED
+            _draw_context_ring(draw, ring_cx, ring_cy, ring_r, pct, ring_fg)
+
+        # Time ago (bottom left)
         af = font(11)
-        draw.text((10, 82), _time_ago(s.last_seen), fill=DIM_GREY, font=af)
+        draw.text((10, h - 16), _time_ago(s.last_seen), fill=DIM_GREY, font=af)
 
         return img
 

@@ -1,8 +1,11 @@
-"""Claude Code hook event bus.
+"""Claude Code session store and hook event helpers.
 
-Exposes a singleton ``HOOKS`` that behaviors subscribe to. The daemon's
-``POST /hook/event`` endpoint normalizes incoming Claude Code hook payloads
-into ``HookEvent`` and publishes them.
+The daemon's ``POST /hook/event`` endpoint normalizes incoming Claude Code
+hook payloads into ``HookEvent``, records them in a global ``SessionStore``,
+and optionally publishes to the ``HookBus`` for push-based consumers.
+
+Behaviors that care about Claude Code state should *poll*
+``SESSIONS.snapshot()`` each tick rather than subscribing to the bus.
 """
 
 from __future__ import annotations
@@ -13,6 +16,10 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
+# ---------------------------------------------------------------------------
+# Hook event
+# ---------------------------------------------------------------------------
+
 @dataclass(frozen=True)
 class HookEvent:
     session_id: str
@@ -21,6 +28,71 @@ class HookEvent:
     received_at: float
     raw: dict[str, Any] = field(default_factory=dict)
 
+
+def event_from_payload(payload: dict[str, Any]) -> HookEvent:
+    sid = str(payload.get("session_id") or payload.get("sessionId") or "")
+    hook = str(payload.get("hook_event_name") or payload.get("hook") or "")
+    hwnd_raw = payload.get("hwnd")
+    try:
+        hwnd = int(hwnd_raw) if hwnd_raw is not None else None
+    except (TypeError, ValueError):
+        hwnd = None
+    return HookEvent(
+        session_id=sid,
+        hook=hook,
+        hwnd=hwnd,
+        received_at=time.monotonic(),
+        raw=payload,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Session store (poll-friendly)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SessionInfo:
+    session_id: str
+    last_hook: str
+    hwnd: int | None
+    last_seen: float
+
+
+class SessionStore:
+    """Thread-safe store of the latest hook per Claude Code session."""
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, SessionInfo] = {}
+        self._lock = threading.Lock()
+
+    def record(self, evt: HookEvent) -> None:
+        if not evt.session_id:
+            return
+        with self._lock:
+            prev = self._sessions.get(evt.session_id)
+            hwnd = evt.hwnd or (prev.hwnd if prev else None)
+            if evt.hook == "SessionEnd":
+                self._sessions.pop(evt.session_id, None)
+            else:
+                self._sessions[evt.session_id] = SessionInfo(
+                    evt.session_id, evt.hook, hwnd, evt.received_at,
+                )
+
+    def snapshot(self) -> list[SessionInfo]:
+        with self._lock:
+            return list(self._sessions.values())
+
+    def drop(self, session_id: str) -> None:
+        with self._lock:
+            self._sessions.pop(session_id, None)
+
+
+SESSIONS = SessionStore()
+
+
+# ---------------------------------------------------------------------------
+# Push-based hook bus (kept for other consumers)
+# ---------------------------------------------------------------------------
 
 class HookBus:
     def __init__(self) -> None:
@@ -50,20 +122,3 @@ class HookBus:
 
 
 HOOKS = HookBus()
-
-
-def event_from_payload(payload: dict[str, Any]) -> HookEvent:
-    sid = str(payload.get("session_id") or payload.get("sessionId") or "")
-    hook = str(payload.get("hook_event_name") or payload.get("hook") or "")
-    hwnd_raw = payload.get("hwnd")
-    try:
-        hwnd = int(hwnd_raw) if hwnd_raw is not None else None
-    except (TypeError, ValueError):
-        hwnd = None
-    return HookEvent(
-        session_id=sid,
-        hook=hook,
-        hwnd=hwnd,
-        received_at=time.monotonic(),
-        raw=payload,
-    )

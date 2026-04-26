@@ -70,9 +70,9 @@ class StaticLabelBehavior(Behavior):
 
         if text:
             size = int(self.config.get("font_size") or 16)
-            font = font(size)
+            f = font(size)
             draw = ImageDraw.Draw(img)
-            bbox = draw.textbbox((0, 0), text, font=font)
+            bbox = draw.textbbox((0, 0), text, font=f)
             tw = bbox[2] - bbox[0]
             th = bbox[3] - bbox[1]
             tx = (w - tw) // 2 - bbox[0]
@@ -80,6 +80,6 @@ class StaticLabelBehavior(Behavior):
                 ty = h - th - 4 - bbox[1]
             else:
                 ty = (h - th) // 2 - bbox[1]
-            draw.text((tx, ty), text, fill=fg, font=font)
+            draw.text((tx, ty), text, fill=fg, font=f)
 
         return img

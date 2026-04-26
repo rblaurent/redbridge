@@ -2,6 +2,7 @@
 
 from behaviors import (  # noqa: F401
     claude_code_idle,
+    claude_thinking,
     empty,
     launch_app,
     run_command,

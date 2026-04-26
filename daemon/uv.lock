@@ -359,6 +359,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pyvda"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "comtypes" },
+    { name = "pywin32" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9b/23/544bcb95a2fa023bc9c3495f29b69a4c406e925702ddb3d4739e65ff3c0a/pyvda-0.5.0.tar.gz", hash = "sha256:cd4b8ec91e6a3bd34f3123cded06b3c37b4142798bd7fd18a2fddc4fc7ea9ad9", size = 16241, upload-time = "2024-12-07T21:15:15.825Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/f6/5ce18631b23c6861fd6f1351833e51ea25d72a453794cdf11e89d38d73cf/pyvda-0.5.0-py3-none-any.whl", hash = "sha256:6318568714c452a03b324be00f7986eb818a56f4564d8e27e53ac519881bbb2d", size = 16832, upload-time = "2024-12-07T21:15:14.787Z" },
+]
+
+[[package]]
 name = "pywin32"
 version = "311"
 source = { registry = "https://pypi.org/simple" }
@@ -431,6 +444,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pycaw", marker = "sys_platform == 'win32'" },
     { name = "pydantic" },
+    { name = "pyvda", marker = "sys_platform == 'win32'" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "streamdeck" },
     { name = "uvicorn", extra = ["standard"] },
@@ -444,6 +458,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=10.0" },
     { name = "pycaw", marker = "sys_platform == 'win32'", specifier = ">=20240210" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "pyvda", marker = "sys_platform == 'win32'", specifier = ">=0.3" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=306" },
     { name = "streamdeck", specifier = ">=0.9.5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },

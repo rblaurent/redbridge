@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 import behaviors  # noqa: F401 — side-effect: populates registry
 from registry import all_behaviors
 from runtime import DeckRuntime
-from sessions import HOOKS, event_from_payload
+from sessions import HOOKS, SESSIONS, event_from_payload
 
 
 DAEMON_DIR = Path(__file__).resolve().parent
@@ -183,10 +183,19 @@ def get_state() -> StateSnapshot:
 @app.post("/hook/event")
 async def hook_event(payload: dict[str, Any]) -> dict[str, str]:
     evt = event_from_payload(payload)
+    chain = payload.get("_chain") or []
+    chain_str = " -> ".join(
+        f"{c.get('exe','?')}({c.get('pid')})"
+        + (f"[w={c.get('hwnd')}]" if c.get("hwnd") else "")
+        for c in chain
+    )
     print(
         f"[hook] {evt.hook!r} session={evt.session_id[:8]} hwnd={evt.hwnd}",
         flush=True,
     )
+    if chain:
+        print(f"[hook]   chain: {chain_str}", flush=True)
+    SESSIONS.record(evt)
     HOOKS.publish(evt)
     return {"ok": "accepted"}
 

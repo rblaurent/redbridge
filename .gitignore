@@ -21,3 +21,4 @@ webui/dist/
 
 # Runtime
 daemon/config.json
+daemon/.discord_token

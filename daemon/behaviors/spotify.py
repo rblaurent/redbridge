@@ -300,9 +300,12 @@ def _format_ms(ms: int) -> str:
 
 
 def _round_corners(img: Image.Image, radius: int) -> Image.Image:
-    mask = Image.new("L", img.size, 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle((0, 0, img.width, img.height), radius, fill=255)
+    ss = 4
+    big = Image.new("L", (img.width * ss, img.height * ss), 0)
+    ImageDraw.Draw(big).rounded_rectangle(
+        (0, 0, img.width * ss - 1, img.height * ss - 1), radius * ss, fill=255,
+    )
+    mask = big.resize(img.size, Image.LANCZOS)
     result = Image.new("RGB", img.size, (0, 0, 0))
     result.paste(img, mask=mask)
     return result
@@ -415,8 +418,12 @@ class SpotifyAlbumArt(Behavior):
                 cw, ch = raw.size
                 inset = int(min(cw, ch) * 0.05)
                 raw = raw.crop((inset, inset, cw - inset, ch - inset))
-                raw = raw.resize((w, h), Image.LANCZOS)
-                self._art_img = _round_corners(raw, 18)
+                aw, ah = int(w * 0.9), int(h * 0.9)
+                raw = raw.resize((aw, ah), Image.LANCZOS)
+                rounded = _round_corners(raw, 16)
+                canvas = Image.new("RGB", (w, h), (0, 0, 0))
+                canvas.paste(rounded, ((w - aw) // 2, (h - ah) // 2))
+                self._art_img = canvas
             except Exception:
                 self._art_img = None
             self._art_bytes_id = art_id

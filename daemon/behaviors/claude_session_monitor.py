@@ -134,18 +134,9 @@ def _workspace_name(cwd: str) -> str:
 
 
 def _sorted_sessions() -> list[SessionInfo]:
-    now = time.monotonic()
-    cutoff = now - STALE_AFTER_SECONDS
-    done_cutoff = now - DONE_STALE_SECONDS
     alive: list[SessionInfo] = []
     for s in SESSIONS.snapshot():
         if not s.hwnd:
-            continue
-        if s.last_seen < cutoff:
-            SESSIONS.drop(s.session_id)
-            continue
-        if s.last_hook in WAITING_HOOKS and s.last_seen < done_cutoff:
-            SESSIONS.drop(s.session_id)
             continue
         if not is_window(s.hwnd):
             SESSIONS.drop(s.session_id)

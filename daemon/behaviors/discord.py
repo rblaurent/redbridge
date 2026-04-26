@@ -390,12 +390,16 @@ def _recv_loop_sync(pipe: _IpcPipe, httpx_mod, gen: int) -> None:
 
         try:
             msg = pipe.recv()
-        except Exception:
+        except Exception as e:
+            _log(f"recv error (pipe closed?): {e}")
             break
 
         cmd = msg.get("cmd")
         evt = msg.get("evt")
         data = msg.get("data") or {}
+
+        if cmd == "SET_VOICE_SETTINGS":
+            _log(f"SET_VOICE_SETTINGS sent — response: {msg}")
 
         if cmd == "DISPATCH" and evt == "VOICE_SETTINGS_UPDATE":
             with _lock:
@@ -426,7 +430,11 @@ def _recv_loop_sync(pipe: _IpcPipe, httpx_mod, gen: int) -> None:
                     _state.in_voice = False
                     _state.last_update = time.monotonic()
             else:
-                _update_voice_channel(data, httpx_mod)
+                _update_voice_channel(data, httpx_mod, pipe)
+
+        elif cmd == "GET_GUILD":
+            if evt != "ERROR" and data:
+                _update_guild(data, httpx_mod)
 
         elif cmd == "GET_VOICE_SETTINGS":
             if data:
@@ -443,10 +451,8 @@ def _recv_loop_sync(pipe: _IpcPipe, httpx_mod, gen: int) -> None:
                 pipe.send(_rpc_payload("GET_SELECTED_VOICE_CHANNEL"))
 
 
-def _update_voice_channel(data: dict, httpx_mod) -> None:
-    guild = data.get("guild") or {}
-    guild_id = str(guild.get("id", ""))
-    guild_icon_hash = guild.get("icon_url") or guild.get("icon") or ""
+def _update_voice_channel(data: dict, httpx_mod, pipe: _IpcPipe | None = None) -> None:
+    guild_id = str(data.get("guild_id") or "")
 
     voice_states = data.get("voice_states") or []
     users = []
@@ -456,25 +462,39 @@ def _update_voice_channel(data: dict, httpx_mod) -> None:
         name = nick or user.get("global_name") or user.get("username") or "?"
         users.append(name)
 
-    prev_icon_key = ""
     with _lock:
-        prev_icon_key = f"{_state.guild_id}:{_state.guild_icon_hash}"
+        prev_guild_id = _state.guild_id
         _state.in_voice = True
         _state.channel_name = data.get("name") or ""
-        _state.guild_name = guild.get("name") or ""
         _state.guild_id = guild_id
-        _state.guild_icon_hash = guild_icon_hash
         _state.users = users
         _state.last_update = time.monotonic()
 
-    new_icon_key = f"{guild_id}:{guild_icon_hash}"
-    if new_icon_key != prev_icon_key and guild_id and guild_icon_hash:
-        _fetch_guild_icon(guild_id, guild_icon_hash, httpx_mod)
+    if guild_id and guild_id != prev_guild_id and pipe is not None:
+        pipe.send(_rpc_payload("GET_GUILD", {"guild_id": guild_id}))
+
+
+def _update_guild(data: dict, httpx_mod) -> None:
+    name = data.get("name") or ""
+    icon_hash = data.get("icon_url") or ""
+
+    with _lock:
+        prev_icon = _state.guild_icon_hash
+        _state.guild_name = name
+        _state.guild_icon_hash = icon_hash
+        _state.last_update = time.monotonic()
+
+    if icon_hash and icon_hash != prev_icon:
+        guild_id = _snap().guild_id
+        _fetch_guild_icon(guild_id, icon_hash, httpx_mod)
 
 
 def _fetch_guild_icon(guild_id: str, icon_hash: str, httpx_mod) -> None:
-    ext = "gif" if icon_hash.startswith("a_") else "png"
-    url = f"https://cdn.discordapp.com/icons/{guild_id}/{icon_hash}.{ext}?size=128"
+    if icon_hash.startswith("http"):
+        url = icon_hash
+    else:
+        ext = "gif" if icon_hash.startswith("a_") else "png"
+        url = f"https://cdn.discordapp.com/icons/{guild_id}/{icon_hash}.{ext}?size=128"
     try:
         resp = httpx_mod.get(url, timeout=5.0)
         if resp.status_code == 200:

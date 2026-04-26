@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+import time
 
 from PIL import Image, ImageDraw
 
@@ -25,6 +26,7 @@ DIM_GREY = (90, 90, 90)
 ROW_H = 22
 VISIBLE_ROWS = 4
 ROW_START_Y = 6
+_TIMEOUT_S: float = 5.0
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -35,6 +37,7 @@ _picker_active: bool = False
 _selected_index: int = 0
 _workspaces: list[str] = []
 _overlay_refs: dict | None = None
+_last_interaction: float = 0.0
 
 
 def _get_active() -> bool:
@@ -56,6 +59,25 @@ def _set_selected(idx: int) -> None:
 def _get_workspaces() -> list[str]:
     with _state_lock:
         return list(_workspaces)
+
+
+def _touch_interaction() -> None:
+    global _last_interaction
+    with _state_lock:
+        _last_interaction = time.monotonic()
+
+
+def _close_picker(bus: EventBus) -> None:
+    global _picker_active, _overlay_refs
+    with _state_lock:
+        _picker_active = False
+        _overlay_refs = None
+    bus.publish("overlay:clear", {
+        "strip": [0, 1],
+        "dial_rotate": [0],
+        "dial_press": [0],
+    })
+    bus.publish("tick:boost", {"hz": 0, "until": 0})
 
 
 # ---------------------------------------------------------------------------
@@ -142,14 +164,7 @@ class WorkspaceLauncherToggle(Behavior):
         global _picker_active, _selected_index, _workspaces, _overlay_refs
 
         if _get_active():
-            with _state_lock:
-                _picker_active = False
-                _overlay_refs = None
-            self.bus.publish("overlay:clear", {
-                "strip": [0, 1],
-                "dial_rotate": [0],
-                "dial_press": [0],
-            })
+            _close_picker(self.bus)
             return
 
         ws = _scan_workspaces()
@@ -157,6 +172,8 @@ class WorkspaceLauncherToggle(Behavior):
             _workspaces = ws
             _selected_index = 0
             _picker_active = True
+        _touch_interaction()
+        self.bus.publish("tick:boost", {"hz": 60.0, "until": time.monotonic() + 60})
 
         carousel = _WorkspaceCarousel(
             Target(TargetKind.STRIP_REGION, 0), {}, self.bus,
@@ -213,6 +230,13 @@ class _WorkspaceCarousel(Behavior):
         self._prev_key: tuple = ()
 
     def tick(self) -> bool:
+        if not _get_active():
+            return False
+        with _state_lock:
+            elapsed = time.monotonic() - _last_interaction
+        if elapsed >= _TIMEOUT_S:
+            _close_picker(self.bus)
+            return False
         ws = _get_workspaces()
         idx = _get_selected()
         key = (tuple(ws), idx)
@@ -329,6 +353,7 @@ class _WorkspaceScroll(Behavior):
             return
         idx = _get_selected() + delta
         _set_selected(max(0, min(idx, n - 1)))
+        _touch_interaction()
 
 
 # ---------------------------------------------------------------------------
@@ -340,8 +365,6 @@ class _WorkspaceLaunch(Behavior):
     targets = {TargetKind.DIAL_PRESS}
 
     def on_press(self) -> None:
-        global _picker_active, _overlay_refs
-
         ws = _get_workspaces()
         n = len(ws)
         if n == 0:
@@ -352,12 +375,4 @@ class _WorkspaceLaunch(Behavior):
         _launch_claude_code(folder)
         print(f"[workspace_launcher] launched: {folder}", flush=True)
 
-        with _state_lock:
-            _picker_active = False
-            _overlay_refs = None
-
-        self.bus.publish("overlay:clear", {
-            "strip": [0, 1],
-            "dial_rotate": [0],
-            "dial_press": [0],
-        })
+        _close_picker(self.bus)

@@ -22,7 +22,10 @@ from StreamDeck.ImageHelpers import PILHelper
 
 import behaviors  # noqa: F401 — register behaviors
 from behaviors.base import Behavior, EventBus, Target, TargetKind
+from log import setup as setup_log
 from registry import get as get_behavior, reload_behaviors
+
+_log = setup_log().getChild("runtime")
 
 _DAEMON_DIR = Path(__file__).resolve().parent
 _BEHAVIORS_DIR = _DAEMON_DIR / "behaviors"
@@ -59,6 +62,10 @@ class DeckRuntime:
         self._boost_hz: float = 0.0
         self._boost_until: float = 0.0
 
+        self._dirty_keys: set[int] = set()
+        self._dirty_strips: set[int] = set()
+        self._tick_wake = threading.Event()
+
         self._layout_loader: Callable[[], Any] | None = None
         self._watch_thread: threading.Thread | None = None
 
@@ -75,7 +82,7 @@ class DeckRuntime:
         try:
             decks = DeviceManager().enumerate()
         except Exception as e:
-            print(f"[runtime] HID probe failed: {e}", flush=True)
+            _log.error("HID probe failed: %s", e)
             decks = []
         if decks:
             self._deck = decks[0]
@@ -86,13 +93,12 @@ class DeckRuntime:
                 self._deck.set_dial_callback(self._on_dial)
             if hasattr(self._deck, "set_touchscreen_callback"):
                 self._deck.set_touchscreen_callback(self._on_touch)
-            print(
-                f"[runtime] deck attached: {self._deck.deck_type()} "
-                f"serial={self._deck.get_serial_number()}",
-                flush=True,
+            _log.info(
+                "deck attached: %s serial=%s",
+                self._deck.deck_type(), self._deck.get_serial_number(),
             )
         else:
-            print("[runtime] no deck attached — running mirror-only", flush=True)
+            _log.info("no deck attached — running mirror-only")
 
         self._tick_thread = threading.Thread(target=self._tick_loop, daemon=True)
         self._tick_thread.start()
@@ -102,6 +108,7 @@ class DeckRuntime:
 
     def stop(self) -> None:
         self._stop.set()
+        self._tick_wake.set()
         if self._deck is not None:
             try:
                 self._deck.reset()
@@ -124,7 +131,7 @@ class DeckRuntime:
             try:
                 self._deck.set_brightness(self._brightness)
             except Exception as e:
-                print(f"[runtime] set_brightness failed: {e}", flush=True)
+                _log.error("set_brightness failed: %s", e)
         self._asleep = False
         self._last_input = time.monotonic()
 
@@ -167,8 +174,10 @@ class DeckRuntime:
                 idx = int(s_str)
                 cls = get_behavior(a.behavior) or get_behavior("empty")
                 self._strip[idx] = cls(Target(TargetKind.STRIP_REGION, idx), dict(a.config), self._bus)
+            self._dirty_keys.update(self._keys.keys())
+            self._dirty_strips.update(self._strip.keys())
             self._last_png.clear()
-        self._render_all()
+        self._tick_wake.set()
 
     def snapshot(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -179,18 +188,6 @@ class DeckRuntime:
 
     # ---- render --------------------------------------------------------------
 
-    def _render_all(self) -> None:
-        with self._lock:
-            keys = list(self._keys.items())
-            strip = [
-                (idx, self._overlay_strip.get(idx, base))
-                for idx, base in self._strip.items()
-            ]
-        for idx, b in keys:
-            self._render_key(idx, b)
-        for idx, b in strip:
-            self._render_strip(idx, b)
-
     def _render_key(self, idx: int, b: Behavior) -> None:
         img = self._safe_render(b)
         if img is None:
@@ -200,7 +197,7 @@ class DeckRuntime:
                 native = PILHelper.to_native_key_format(self._deck, img)
                 self._deck.set_key_image(idx, native)
             except Exception as e:
-                print(f"[runtime] set_key_image({idx}) failed: {e}", flush=True)
+                _log.error("set_key_image(%d) failed: %s", idx, e)
         self._broadcast_render(f"key:{idx}", img)
 
     def _render_strip(self, idx: int, b: Behavior) -> None:
@@ -214,7 +211,7 @@ class DeckRuntime:
                     native, x_pos=idx * 200, y_pos=0, width=200, height=100
                 )
             except Exception as e:
-                print(f"[runtime] set_touchscreen_image({idx}) failed: {e}", flush=True)
+                _log.error("set_touchscreen_image(%d) failed: %s", idx, e)
         self._broadcast_render(f"strip:{idx}", img)
 
     @staticmethod
@@ -222,7 +219,7 @@ class DeckRuntime:
         try:
             return b.render()
         except Exception as e:
-            print(f"[runtime] render failed for {b.type_id}: {e}", flush=True)
+            _log.error("render failed for %s: %s", b.type_id, e)
             return None
 
     def _broadcast_render(self, target_id: str, img: Image.Image) -> None:
@@ -253,23 +250,20 @@ class DeckRuntime:
             self._overlay_strip.update(strips)
             self._overlay_dial_rotate.update(payload.get("dial_rotate", {}))
             self._overlay_dial_press.update(payload.get("dial_press", {}))
-        for idx, b in strips.items():
-            self._render_strip(idx, b)
+            self._dirty_strips.update(strips.keys())
+        self._tick_wake.set()
 
     def _on_overlay_clear(self, payload: dict[str, Any]) -> None:
-        to_render: list[tuple[int, Behavior]] = []
         with self._lock:
             for idx in payload.get("strip", []):
                 self._overlay_strip.pop(idx, None)
-                base = self._strip.get(idx)
-                if base:
-                    to_render.append((idx, base))
+                if idx in self._strip:
+                    self._dirty_strips.add(idx)
             for idx in payload.get("dial_rotate", []):
                 self._overlay_dial_rotate.pop(idx, None)
             for idx in payload.get("dial_press", []):
                 self._overlay_dial_press.pop(idx, None)
-        for idx, b in to_render:
-            self._render_strip(idx, b)
+        self._tick_wake.set()
 
     def _on_tick_boost(self, payload: dict[str, Any]) -> None:
         self._boost_hz = float(payload.get("hz", 60.0))
@@ -289,8 +283,10 @@ class DeckRuntime:
         try:
             b.on_press()
         except Exception as e:
-            print(f"[runtime] on_press({key}) failed: {e}", flush=True)
-        self._render_key(key, b)
+            _log.error("on_press(%d) failed: %s", key, e)
+        with self._lock:
+            self._dirty_keys.add(key)
+        self._tick_wake.set()
 
     def _on_dial(self, _deck: Any, dial: int, event: DialEventType, value: Any) -> None:
         self._wake()
@@ -305,7 +301,7 @@ class DeckRuntime:
             try:
                 b.on_press()
             except Exception as e:
-                print(f"[runtime] dial.on_press({dial}) failed: {e}", flush=True)
+                _log.error("dial.on_press(%d) failed: %s", dial, e)
         elif event == DialEventType.TURN:
             delta = int(value)
             self._broadcast_input(f"dial:{dial}:rotate", "rotate", {"delta": delta})
@@ -316,7 +312,7 @@ class DeckRuntime:
             try:
                 b.on_rotate(delta)
             except Exception as e:
-                print(f"[runtime] dial.on_rotate({dial}) failed: {e}", flush=True)
+                _log.error("dial.on_rotate(%d) failed: %s", dial, e)
 
     def _on_touch(self, _deck: Any, event: TouchscreenEventType, value: dict) -> None:
         self._wake()
@@ -330,7 +326,9 @@ class DeckRuntime:
         while True:
             now = time.monotonic()
             hz = max(self._tick_hz, self._boost_hz if now < self._boost_until else 0)
-            if self._stop.wait(1.0 / hz):
+            self._tick_wake.wait(1.0 / hz)
+            self._tick_wake.clear()
+            if self._stop.is_set():
                 break
             if (
                 self._screensaver_minutes > 0
@@ -351,18 +349,22 @@ class DeckRuntime:
                     (idx, self._overlay_strip.get(idx, base))
                     for idx, base in self._strip.items()
                 ]
+                pending_keys = self._dirty_keys.copy()
+                self._dirty_keys.clear()
+                pending_strips = self._dirty_strips.copy()
+                self._dirty_strips.clear()
             for idx, b in keys:
                 try:
-                    if b.tick():
+                    if b.tick() or idx in pending_keys:
                         self._render_key(idx, b)
                 except Exception as e:
-                    print(f"[runtime] tick key {idx}: {e}", flush=True)
+                    _log.error("tick key %d: %s", idx, e)
             for idx, b in strip:
                 try:
-                    if b.tick():
+                    if b.tick() or idx in pending_strips:
                         self._render_strip(idx, b)
                 except Exception as e:
-                    print(f"[runtime] tick strip {idx}: {e}", flush=True)
+                    _log.error("tick strip %d: %s", idx, e)
 
     # ---- hot reload ----------------------------------------------------------
 
@@ -386,15 +388,15 @@ class DeckRuntime:
                     if prev is not None:
                         changed = True
             if changed:
-                print("[runtime] behavior file change detected, reloading…", flush=True)
+                _log.info("behavior file change detected, reloading…")
                 try:
                     reload_behaviors()
                 except Exception as e:
-                    print(f"[runtime] reload failed: {e}", flush=True)
+                    _log.error("reload failed: %s", e)
                     continue
                 if self._layout_loader is not None:
                     try:
                         self.apply_layout(self._layout_loader())
                     except Exception as e:
-                        print(f"[runtime] re-apply layout failed: {e}", flush=True)
-                print("[runtime] reload complete", flush=True)
+                        _log.error("re-apply layout failed: %s", e)
+                _log.info("reload complete")

@@ -13,9 +13,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import behaviors  # noqa: F401 — side-effect: populates registry
+from log import setup as setup_log
 from registry import all_behaviors, reload_behaviors
 from runtime import DeckRuntime
 from sessions import HOOKS, SESSIONS, event_from_payload
+
+_log = setup_log().getChild("main")
 
 
 DAEMON_DIR = Path(__file__).resolve().parent
@@ -247,12 +250,12 @@ async def hook_event(payload: dict[str, Any]) -> dict[str, str]:
         for c in chain
     )
     cwd = payload.get("cwd", "")
-    print(
-        f"[hook] {evt.hook!r} session={evt.session_id[:8]} hwnd={evt.hwnd} cwd={cwd!r}",
-        flush=True,
+    _log.info(
+        "hook %r session=%s hwnd=%s cwd=%r",
+        evt.hook, evt.session_id[:8], evt.hwnd, cwd,
     )
     if chain:
-        print(f"[hook]   chain: {chain_str}", flush=True)
+        _log.debug("  chain: %s", chain_str)
     SESSIONS.record(evt)
     HOOKS.publish(evt)
     return {"ok": "accepted"}

@@ -125,6 +125,10 @@ class ClaudeCodeIdleBehavior(Behavior):
         t_count, w_count = self._t, self._w
 
         img = Image.new("RGB", (w, h), (0, 0, 0))
+
+        if not self._alive:
+            return img
+
         draw = ImageDraw.Draw(img)
 
         glyph_size = 72

@@ -304,7 +304,6 @@ class ClaudeSessionDetail(Behavior):
         img = strip_bg(w, h)
         draw = ImageDraw.Draw(img)
         draw.rectangle((0, 0, w, 2), fill=CLAUDE_ORANGE)
-        draw.rectangle((0, 0, 2, h), fill=CLAUDE_ORANGE)
 
         if n == 0:
             return img
@@ -315,19 +314,19 @@ class ClaudeSessionDetail(Behavior):
 
         title_text = get_console_title(s.hwnd) or _workspace_name(s.cwd)
         tf = font_semibold(14)
-        title_text = _truncate(draw, title_text, tf, w - 24)
-        draw.text((12, 22), title_text, fill=(255, 255, 255), font=tf, anchor="lm")
+        title_text = _truncate(draw, title_text, tf, w - 20)
+        draw.text((10, 22), title_text, fill=(255, 255, 255), font=tf, anchor="lm")
 
-        draw.text((12, 42), _status_text(s), fill=color, font=font(11), anchor="lm")
+        draw.text((10, 42), _status_text(s), fill=color, font=font(11), anchor="lm")
 
         if s.tool_name and s.last_hook in THINKING_HOOKS:
-            draw.text((12, 60), f"Tool: {s.tool_name}",
+            draw.text((10, 60), f"Tool: {s.tool_name}",
                        fill=(70, 70, 70), font=font_semilight(10), anchor="lm")
 
         if meta.context_used > 0:
             pct = min(1.0, meta.context_used / meta.context_max)
             bar_fg = CLAUDE_ORANGE if pct < 0.8 else STATUS_RED
-            bx1, bx2, by, bh = 12, w - 10, 82, 8
+            bx1, bx2, by, bh = 10, w - 10, 82, 8
             bar_r = bh // 2
             draw.rounded_rectangle((bx1, by, bx2, by + bh), bar_r, fill=(30, 30, 32))
             fill_x = bx1 + int((bx2 - bx1) * pct)

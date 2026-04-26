@@ -494,7 +494,7 @@ def _fetch_guild_icon(guild_id: str, icon_hash: str, httpx_mod) -> None:
         url = icon_hash
     else:
         ext = "gif" if icon_hash.startswith("a_") else "png"
-        url = f"https://cdn.discordapp.com/icons/{guild_id}/{icon_hash}.{ext}?size=128"
+        url = f"https://cdn.discordapp.com/icons/{guild_id}/{icon_hash}.{ext}?size=256"
     try:
         resp = httpx_mod.get(url, timeout=5.0)
         if resp.status_code == 200:

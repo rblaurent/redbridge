@@ -355,6 +355,7 @@ def _connect_and_run(httpx, gen: int) -> float:
 
         with _lock:
             _state.connected = True
+            _state.volume = _get_discord_volume()
             _state.last_update = time.monotonic()
         _log("RPC subscribed")
 

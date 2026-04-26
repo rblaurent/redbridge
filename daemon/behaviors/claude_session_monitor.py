@@ -182,16 +182,6 @@ def _status_text(session: SessionInfo) -> str:
     return session.last_hook or "unknown"
 
 
-def _time_ago(last_seen: float) -> str:
-    delta = time.monotonic() - last_seen
-    if delta < 10:
-        return "just now"
-    if delta < 60:
-        return f"{int(delta)}s ago"
-    if delta < 3600:
-        return f"{int(delta // 60)}m ago"
-    return f"{int(delta // 3600)}h ago"
-
 
 def _truncate(draw: ImageDraw.ImageDraw, text: str, f, max_w: int) -> str:
     if draw.textlength(text, font=f) <= max_w:
@@ -202,20 +192,6 @@ def _truncate(draw: ImageDraw.ImageDraw, text: str, f, max_w: int) -> str:
             return candidate
     return "..."
 
-
-def _draw_context_ring(
-    draw: ImageDraw.ImageDraw,
-    cx: int, cy: int, radius: int,
-    pct: float,
-    fg: tuple[int, int, int],
-    bg: tuple[int, int, int] = (50, 50, 50),
-    width: int = 3,
-) -> None:
-    bbox = (cx - radius, cy - radius, cx + radius, cy + radius)
-    draw.arc(bbox, 0, 360, fill=bg, width=width)
-    if pct > 0:
-        sweep = min(pct, 1.0) * 360
-        draw.arc(bbox, -90, -90 + sweep, fill=fg, width=width)
 
 
 # ---------------------------------------------------------------------------
@@ -342,33 +318,33 @@ class ClaudeSessionDetail(Behavior):
         # Accent bar
         draw.rectangle((0, 0, 3, h), fill=color)
 
-        # Session title (primary heading — read from console window title)
+        # Session title
         title_text = get_console_title(s.hwnd) or _workspace_name(s.cwd)
-        nf = font(15)
-        title_text = _truncate(draw, title_text, nf, w - 16)
-        draw.text((10, 10), title_text, fill=(255, 255, 255), font=nf, anchor="lm")
+        tf = font(15)
+        title_text = _truncate(draw, title_text, tf, w - 16)
+        draw.text((8, 14), title_text, fill=(255, 255, 255), font=tf, anchor="lm")
 
         # Status
-        sf = font(14)
-        draw.text((10, 32), _status_text(s), fill=color, font=sf, anchor="lm")
+        sf = font(12)
+        draw.text((8, 34), _status_text(s), fill=color, font=sf, anchor="lm")
 
         # Tool name
         if s.tool_name and s.last_hook in THINKING_HOOKS:
-            tlf = font(12)
-            draw.text((10, 52), f"Tool: {s.tool_name}", fill=(120, 120, 120), font=tlf, anchor="lm")
+            draw.text((8, 58), f"Tool: {s.tool_name}",
+                       fill=(100, 100, 100), font=font(11), anchor="lm")
 
-        # Context ring + time ago (bottom right area)
+        # Context progress bar
         if meta.context_used > 0:
-            pct = meta.context_used / meta.context_max
-            ring_r = 12
-            ring_cx = w - ring_r - 8
-            ring_cy = h - ring_r - 8
-            ring_fg = CLAUDE_ORANGE if pct < 0.8 else STATUS_RED
-            _draw_context_ring(draw, ring_cx, ring_cy, ring_r, pct, ring_fg)
-
-        # Time ago (bottom left)
-        af = font(11)
-        draw.text((10, h - 16), _time_ago(s.last_seen), fill=DIM_GREY, font=af)
+            pct = min(1.0, meta.context_used / meta.context_max)
+            bar_fg = CLAUDE_ORANGE if pct < 0.8 else STATUS_RED
+            bx1, bx2, by, bh = 8, w - 8, 78, 6
+            bar_r = bh // 2
+            draw.rounded_rectangle((bx1, by, bx2, by + bh), bar_r, fill=(42, 42, 42))
+            fill_x = bx1 + int((bx2 - bx1) * pct)
+            if fill_x > bx1 + bar_r:
+                draw.rounded_rectangle(
+                    (bx1, by, fill_x, by + bh), bar_r, fill=bar_fg,
+                )
 
         return img
 

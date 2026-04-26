@@ -46,7 +46,7 @@ class Layout(BaseModel):
 class DeviceSettings(BaseModel):
     brightness: int = Field(default=75, ge=0, le=100)
     screensaver_minutes: int = Field(default=15, ge=0, le=60)
-    tick_hz: int = Field(default=4, ge=1, le=30)
+    tick_hz: int = Field(default=4, ge=1, le=60)
 
 
 class BehaviorInfo(BaseModel):

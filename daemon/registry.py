@@ -32,6 +32,8 @@ def all_behaviors() -> dict[str, type["Behavior"]]:
 def reload_behaviors() -> None:
     """Clear registry, reload all behavior modules, re-populate via @register."""
     BEHAVIORS.clear()
+    if "gfx" in sys.modules:
+        importlib.reload(sys.modules["gfx"])
     mods = [
         name for name in list(sys.modules)
         if name.startswith("behaviors.") and name != "behaviors.base"

@@ -20,10 +20,10 @@ import time
 from ctypes import wintypes
 from dataclasses import dataclass
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 from behaviors.base import Behavior, EventBus, Target, TargetKind
-from gfx import font
+from gfx import font, glow_bg
 from registry import register
 from win_focus import focus_window
 
@@ -37,11 +37,15 @@ SPOTIFY_GREEN = (30, 185, 84)
 DIM_GREY = (80, 80, 80)
 BAR_BG = (42, 42, 42)
 POLL_INTERVAL = 0.5
+VOLUME_OVERLAY_HOLD = 2.0
+VOLUME_ANIM_DURATION = 0.3
 
 VK_MEDIA_PLAY_PAUSE = 0xB3
 VK_MEDIA_NEXT_TRACK = 0xB0
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
+
+GLOW_PEAK = (10, 56, 28)
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -75,6 +79,7 @@ class _SpotifyState:
     duration_ms: int = 0
     album_art_bytes: bytes | None = None
     volume: float = 0.0
+    volume_changed_at: float = 0.0
     last_update: float = 0.0
 
 
@@ -94,6 +99,7 @@ def _snap() -> _SpotifyState:
             duration_ms=_state.duration_ms,
             album_art_bytes=_state.album_art_bytes,
             volume=_state.volume,
+            volume_changed_at=_state.volume_changed_at,
             last_update=_state.last_update,
         )
 
@@ -284,6 +290,13 @@ def _ensure_poller() -> None:
 # Drawing helpers
 # ---------------------------------------------------------------------------
 
+def _ease_back_out(t: float) -> float:
+    t = t - 1
+    return 1 + t * t * (2.7 * t + 1.7)
+
+
+
+
 def _truncate(draw: ImageDraw.ImageDraw, text: str, f, max_w: int) -> str:
     if draw.textlength(text, font=f) <= max_w:
         return text
@@ -326,23 +339,49 @@ class SpotifyStrip(Behavior):
         super().__init__(target, config, bus)
         _ensure_poller()
         self._prev_key: tuple = ()
+        self._vol_overlay_active: bool = False
+        self._vol_anim_start: float = 0.0
+        self._vol_anim_dir: str = "in"
+
+    def _animating(self) -> bool:
+        if self._vol_anim_start == 0.0:
+            return False
+        return (time.monotonic() - self._vol_anim_start) < VOLUME_ANIM_DURATION
 
     def tick(self) -> bool:
         s = _snap()
-        key = (s.active, s.track, s.artist, s.is_playing, s.position_ms // 1000)
+        now = time.monotonic()
+        showing = (
+            s.volume_changed_at > 0
+            and (now - s.volume_changed_at) < VOLUME_OVERLAY_HOLD
+        )
+
+        if showing and not self._vol_overlay_active:
+            self._vol_anim_start = now
+            self._vol_anim_dir = "in"
+        elif not showing and self._vol_overlay_active:
+            self._vol_anim_start = now
+            self._vol_anim_dir = "out"
+        self._vol_overlay_active = showing
+
+        if self._animating():
+            return True
+
+        key = (
+            s.active, s.track, s.artist, s.is_playing,
+            s.position_ms // 1000, showing, round(s.volume, 2),
+        )
         if key != self._prev_key:
             self._prev_key = key
             return True
         return False
 
-    def render(self) -> Image.Image | None:
+    def _render_track(self, s: _SpotifyState) -> Image.Image:
         w, h = self.size()
-        s = _snap()
         img = Image.new("RGB", (w, h), (0, 0, 0))
-        draw = ImageDraw.Draw(img)
-
         if not s.active or not s.track:
             return img
+        draw = ImageDraw.Draw(img)
 
         tf = font(15)
         draw.text(
@@ -372,8 +411,66 @@ class SpotifyStrip(Behavior):
                 draw.rounded_rectangle(
                     (bx1, by, fill_x, by + bh), bar_r, fill=SPOTIFY_GREEN,
                 )
-
         return img
+
+    def _render_volume(self, s: _SpotifyState) -> Image.Image:
+        w, h = self.size()
+        img = Image.new("RGB", (w, h), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        draw.text(
+            (8, 14), "Volume",
+            fill=(255, 255, 255), font=font(15), anchor="lm",
+        )
+        draw.text(
+            (8, 34), "Spotify",
+            fill=(160, 160, 160), font=font(12), anchor="lm",
+        )
+        draw.text(
+            (8, 58), f"{int(s.volume * 100)}%",
+            fill=(100, 100, 100), font=font(11), anchor="lm",
+        )
+
+        bx1, bx2, by, bh = 8, w - 8, 78, 6
+        bar_r = bh // 2
+        draw.rounded_rectangle((bx1, by, bx2, by + bh), bar_r, fill=BAR_BG)
+        vol = max(0.0, min(1.0, s.volume))
+        fill_x = bx1 + int((bx2 - bx1) * vol)
+        if fill_x > bx1 + bar_r:
+            draw.rounded_rectangle(
+                (bx1, by, fill_x, by + bh), bar_r, fill=SPOTIFY_GREEN,
+            )
+        return img
+
+    def render(self) -> Image.Image | None:
+        w, h = self.size()
+        s = _snap()
+        now = time.monotonic()
+
+        progress = 0.0
+        if self._vol_anim_start > 0:
+            t = min(1.0, (now - self._vol_anim_start) / VOLUME_ANIM_DURATION)
+            if self._vol_anim_dir == "in":
+                progress = _ease_back_out(t)
+            else:
+                progress = 1.0 - _ease_back_out(t)
+                if t >= 1.0:
+                    progress = 0.0
+        if self._vol_overlay_active and not self._animating():
+            progress = 1.0
+
+        bg = glow_bg(w, h, GLOW_PEAK)
+
+        if progress <= 0:
+            return ImageChops.lighter(bg, self._render_track(s))
+
+        img_track = self._render_track(s)
+        img_vol = self._render_volume(s)
+        content = Image.new("RGB", (w, h), (0, 0, 0))
+        y_off = int(h * progress)
+        content.paste(img_track, (0, -y_off))
+        content.paste(img_vol, (0, h - y_off))
+        return ImageChops.lighter(bg, content)
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +592,16 @@ class SpotifyVolume(Behavior):
 
     def on_rotate(self, delta: int) -> None:
         current = _get_spotify_volume()
-        _set_spotify_volume(current + delta * 0.02)
+        new_vol = max(0.0, min(1.0, current + delta * 0.02))
+        _set_spotify_volume(new_vol)
+        now = time.monotonic()
+        with _lock:
+            _state.volume = new_vol
+            _state.volume_changed_at = now
+        self.bus.publish("tick:boost", {
+            "hz": 60.0,
+            "until": now + VOLUME_OVERLAY_HOLD + VOLUME_ANIM_DURATION + 0.1,
+        })
 
 
 # ---------------------------------------------------------------------------

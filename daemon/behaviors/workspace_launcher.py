@@ -14,7 +14,7 @@ import threading
 from PIL import Image, ImageDraw
 
 from behaviors.base import Behavior, EventBus, Target, TargetKind
-from gfx import font
+from gfx import font, glow_bg
 from registry import register
 
 PROJECTS_ROOT = r"T:\Projects"
@@ -22,6 +22,7 @@ _ASSETS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
 
 CLAUDE_ORANGE = (193, 95, 60)
 DIM_GREY = (90, 90, 90)
+GLOW_PEAK = (50, 18, 10)
 ROW_H = 20
 VISIBLE_ROWS = 5
 
@@ -226,7 +227,7 @@ class _WorkspaceCarousel(Behavior):
         n = len(ws)
         idx = max(0, min(_get_selected(), n - 1)) if n else 0
 
-        img = Image.new("RGB", (w, h), (0, 0, 0))
+        img = glow_bg(w, h, GLOW_PEAK)
         draw = ImageDraw.Draw(img)
 
         if n == 0:
@@ -287,7 +288,7 @@ class _WorkspaceDetail(Behavior):
         n = len(ws)
         idx = max(0, min(_get_selected(), n - 1)) if n else 0
 
-        img = Image.new("RGB", (w, h), (15, 15, 15))
+        img = glow_bg(w, h, GLOW_PEAK)
         draw = ImageDraw.Draw(img)
 
         if n == 0:

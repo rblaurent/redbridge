@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from PIL import Image, ImageDraw
 
 from behaviors.base import Behavior, EventBus, Target, TargetKind
-from gfx import font
+from gfx import font, glow_bg
 from registry import register
 from sessions import SESSIONS, SessionInfo
 from win_focus import focus_window, get_console_title, is_window
@@ -39,6 +39,7 @@ CLAUDE_ORANGE = (193, 95, 60)
 STATUS_GREEN = (100, 180, 100)
 STATUS_RED = (210, 100, 80)
 DIM_GREY = (90, 90, 90)
+GLOW_PEAK = (50, 18, 10)
 
 DEFAULT_CONTEXT_MAX = 1_000_000
 TRANSCRIPT_READ_INTERVAL = 5.0
@@ -230,7 +231,7 @@ class ClaudeSessionCarousel(Behavior):
         n = len(sessions)
         idx = _clamped_index(n)
 
-        img = Image.new("RGB", (w, h), (0, 0, 0))
+        img = glow_bg(w, h, GLOW_PEAK)
         draw = ImageDraw.Draw(img)
 
         if n == 0:
@@ -299,7 +300,7 @@ class ClaudeSessionDetail(Behavior):
         n = len(sessions)
         idx = _clamped_index(n)
 
-        img = Image.new("RGB", (w, h), (15, 15, 15))
+        img = glow_bg(w, h, GLOW_PEAK)
         draw = ImageDraw.Draw(img)
 
         if n == 0:
@@ -310,7 +311,7 @@ class ClaudeSessionDetail(Behavior):
         color = _status_color(s.last_hook)
 
         # Accent bar
-        draw.rectangle((0, 0, 3, h), fill=color)
+        draw.rectangle((0, 0, 1, h), fill=CLAUDE_ORANGE)
 
         # Session title
         title_text = get_console_title(s.hwnd) or _workspace_name(s.cwd)

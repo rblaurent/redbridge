@@ -24,7 +24,9 @@ import behaviors  # noqa: F401 — register behaviors
 from behaviors.base import Behavior, EventBus, Target, TargetKind
 from registry import get as get_behavior, reload_behaviors
 
-_BEHAVIORS_DIR = Path(__file__).resolve().parent / "behaviors"
+_DAEMON_DIR = Path(__file__).resolve().parent
+_BEHAVIORS_DIR = _DAEMON_DIR / "behaviors"
+_WATCHED_FILES = [_DAEMON_DIR / "gfx.py"]
 
 
 class _Hub(Protocol):
@@ -54,12 +56,15 @@ class DeckRuntime:
         self._tick_hz: float = 4.0
         self._last_input: float = time.monotonic()
         self._asleep: bool = False
+        self._boost_hz: float = 0.0
+        self._boost_until: float = 0.0
 
         self._layout_loader: Callable[[], Any] | None = None
         self._watch_thread: threading.Thread | None = None
 
         self._bus.subscribe("overlay:set", self._on_overlay_set)
         self._bus.subscribe("overlay:clear", self._on_overlay_clear)
+        self._bus.subscribe("tick:boost", self._on_tick_boost)
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -114,7 +119,7 @@ class DeckRuntime:
         with self._lock:
             self._brightness = settings.brightness
             self._screensaver_minutes = settings.screensaver_minutes
-            self._tick_hz = max(1.0, min(30.0, float(settings.tick_hz)))
+            self._tick_hz = max(1.0, min(60.0, float(settings.tick_hz)))
         if self._deck is not None:
             try:
                 self._deck.set_brightness(self._brightness)
@@ -266,6 +271,10 @@ class DeckRuntime:
         for idx, b in to_render:
             self._render_strip(idx, b)
 
+    def _on_tick_boost(self, payload: dict[str, Any]) -> None:
+        self._boost_hz = float(payload.get("hz", 60.0))
+        self._boost_until = float(payload.get("until", 0.0))
+
     # ---- input ---------------------------------------------------------------
 
     def _on_key(self, _deck: Any, key: int, pressed: bool) -> None:
@@ -318,7 +327,11 @@ class DeckRuntime:
     # ---- tick ----------------------------------------------------------------
 
     def _tick_loop(self) -> None:
-        while not self._stop.wait(1.0 / self._tick_hz):
+        while True:
+            now = time.monotonic()
+            hz = max(self._tick_hz, self._boost_hz if now < self._boost_until else 0)
+            if self._stop.wait(1.0 / hz):
+                break
             if (
                 self._screensaver_minutes > 0
                 and not self._asleep
@@ -357,9 +370,14 @@ class DeckRuntime:
         mtimes: dict[str, float] = {}
         for p in _BEHAVIORS_DIR.glob("*.py"):
             mtimes[str(p)] = p.stat().st_mtime
+        for p in _WATCHED_FILES:
+            if p.exists():
+                mtimes[str(p)] = p.stat().st_mtime
         while not self._stop.wait(1.0):
             changed = False
-            for p in _BEHAVIORS_DIR.glob("*.py"):
+            for p in list(_BEHAVIORS_DIR.glob("*.py")) + _WATCHED_FILES:
+                if not p.exists():
+                    continue
                 key = str(p)
                 mtime = p.stat().st_mtime
                 prev = mtimes.get(key)

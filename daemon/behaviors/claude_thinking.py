@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from PIL import Image, ImageDraw, ImageFont
 
 from behaviors.base import Behavior, EventBus, Target, TargetKind
@@ -70,12 +72,21 @@ class ClaudeThinkingBehavior(Behavior):
         },
     }
 
+    _ANIM_HZ = 4.0
+
     def __init__(self, target: Target, config: dict, bus: EventBus) -> None:
         super().__init__(target, config, bus)
         self._frame = 0
+        self._last_advance = time.monotonic()
 
     def tick(self) -> bool:
-        self._frame = (self._frame + 1) % len(FRAMES)
+        now = time.monotonic()
+        elapsed = now - self._last_advance
+        steps = int(elapsed * self._ANIM_HZ)
+        if steps == 0:
+            return False
+        self._last_advance += steps / self._ANIM_HZ
+        self._frame = (self._frame + steps) % len(FRAMES)
         return True
 
     def render(self) -> Image.Image | None:

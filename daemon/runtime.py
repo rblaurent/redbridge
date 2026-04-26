@@ -11,6 +11,7 @@ import asyncio
 import base64
 import io
 import threading
+import time
 from typing import Any, Protocol
 
 from PIL import Image
@@ -21,9 +22,6 @@ from StreamDeck.ImageHelpers import PILHelper
 import behaviors  # noqa: F401 — register behaviors
 from behaviors.base import Behavior, EventBus, Target, TargetKind
 from registry import get as get_behavior
-
-
-TICK_HZ = 4.0
 
 
 class _Hub(Protocol):
@@ -44,6 +42,12 @@ class DeckRuntime:
         self._stop = threading.Event()
         self._tick_thread: threading.Thread | None = None
         self._last_png: dict[str, str] = {}
+
+        self._brightness: int = 75
+        self._screensaver_minutes: int = 15
+        self._tick_hz: float = 4.0
+        self._last_input: float = time.monotonic()
+        self._asleep: bool = False
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -84,6 +88,31 @@ class DeckRuntime:
                 pass
         if self._tick_thread is not None:
             self._tick_thread.join(timeout=1.0)
+
+    # ---- settings ------------------------------------------------------------
+
+    def apply_settings(self, settings: Any) -> None:
+        with self._lock:
+            self._brightness = settings.brightness
+            self._screensaver_minutes = settings.screensaver_minutes
+            self._tick_hz = max(1.0, min(30.0, float(settings.tick_hz)))
+        if self._deck is not None:
+            try:
+                self._deck.set_brightness(self._brightness)
+            except Exception as e:
+                print(f"[runtime] set_brightness failed: {e}", flush=True)
+        self._asleep = False
+        self._last_input = time.monotonic()
+
+    def _wake(self) -> None:
+        self._last_input = time.monotonic()
+        if self._asleep:
+            self._asleep = False
+            if self._deck is not None:
+                try:
+                    self._deck.set_brightness(self._brightness)
+                except Exception:
+                    pass
 
     # ---- layout --------------------------------------------------------------
 
@@ -189,6 +218,7 @@ class DeckRuntime:
     # ---- input ---------------------------------------------------------------
 
     def _on_key(self, _deck: Any, key: int, pressed: bool) -> None:
+        self._wake()
         self._broadcast_input(f"key:{key}", "press" if pressed else "release")
         if not pressed:
             return
@@ -203,6 +233,7 @@ class DeckRuntime:
         self._render_key(key, b)
 
     def _on_dial(self, _deck: Any, dial: int, event: DialEventType, value: Any) -> None:
+        self._wake()
         if event == DialEventType.PUSH:
             self._broadcast_input(f"dial:{dial}:press", "press" if value else "release")
             if not value:
@@ -228,6 +259,7 @@ class DeckRuntime:
                 print(f"[runtime] dial.on_rotate({dial}) failed: {e}", flush=True)
 
     def _on_touch(self, _deck: Any, event: TouchscreenEventType, value: dict) -> None:
+        self._wake()
         x = int(value.get("x", 0)) if isinstance(value, dict) else 0
         idx = max(0, min(3, x // 200))
         self._broadcast_input(f"strip:{idx}", event.name.lower(), {"value": value})
@@ -235,8 +267,20 @@ class DeckRuntime:
     # ---- tick ----------------------------------------------------------------
 
     def _tick_loop(self) -> None:
-        interval = 1.0 / TICK_HZ
-        while not self._stop.wait(interval):
+        while not self._stop.wait(1.0 / self._tick_hz):
+            if (
+                self._screensaver_minutes > 0
+                and not self._asleep
+                and time.monotonic() - self._last_input
+                > self._screensaver_minutes * 60
+            ):
+                self._asleep = True
+                if self._deck is not None:
+                    try:
+                        self._deck.set_brightness(0)
+                    except Exception:
+                        pass
+
             with self._lock:
                 keys = list(self._keys.items())
                 strip = list(self._strip.items())

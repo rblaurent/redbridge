@@ -118,6 +118,30 @@ export function defaultsFromSchema(schema: JSONSchema): Record<string, unknown> 
   return out;
 }
 
+export interface DeviceSettings {
+  brightness: number;
+  screensaver_minutes: number;
+  tick_hz: number;
+}
+
+export async function fetchSettings(): Promise<DeviceSettings> {
+  const r = await fetch("/api/settings");
+  if (!r.ok) throw new Error(`GET /api/settings → ${r.status}`);
+  return r.json();
+}
+
+export async function saveDeviceSettings(
+  settings: DeviceSettings,
+): Promise<DeviceSettings> {
+  const r = await fetch("/api/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+  if (!r.ok) throw new Error(`PUT /api/settings → ${r.status}`);
+  return r.json();
+}
+
 export async function fetchBehaviors(): Promise<BehaviorInfo[]> {
   const r = await fetch("/api/behaviors");
   if (!r.ok) throw new Error(`GET /api/behaviors → ${r.status}`);

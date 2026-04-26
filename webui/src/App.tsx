@@ -2,13 +2,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DeckMock, type TargetId } from "./components/DeckMock";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { useWS, type WSMsg } from "./hooks/useWS";
+import { SettingsPanel } from "./components/SettingsPanel";
 import {
   fetchBehaviors,
   fetchLayout,
+  fetchSettings,
+  saveDeviceSettings,
   saveLayout,
   type BehaviorInfo,
+  type DeviceSettings,
   type Layout,
 } from "./api";
+
+type SidebarTab = "layout" | "device";
 
 export default function App() {
   const [selected, setSelected] = useState<TargetId | null>(null);
@@ -22,18 +28,23 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("layout");
+  const [settings, setSettings] = useState<DeviceSettings | null>(null);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+
   const [mirrorOn, setMirrorOn] = useState(true);
   const mirrorOnRef = useRef(mirrorOn);
   mirrorOnRef.current = mirrorOn;
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchLayout(), fetchBehaviors()])
-      .then(([l, b]) => {
+    Promise.all([fetchLayout(), fetchBehaviors(), fetchSettings()])
+      .then(([l, b, s]) => {
         if (cancelled) return;
         setLayout(l);
         setOriginalLayout(l);
         setBehaviors(b);
+        setSettings(s);
       })
       .catch((e) => !cancelled && setLoadError(String(e)));
     return () => {
@@ -87,6 +98,18 @@ export default function App() {
       setOriginalLayout(l);
     } catch (e) {
       alert(String(e));
+    }
+  };
+
+  const onSettingsChange = async (next: DeviceSettings) => {
+    setSettings(next);
+    setSettingsSaving(true);
+    try {
+      await saveDeviceSettings(next);
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setSettingsSaving(false);
     }
   };
 
@@ -160,14 +183,49 @@ export default function App() {
             flash={flash}
           />
         </main>
-        <aside className="w-96 border-l border-neutral-800 overflow-y-auto">
-          <ConfigPanel
-            selected={selected}
-            layout={layout}
-            behaviors={behaviors}
-            rendered={rendered}
-            onChange={setLayout}
-          />
+        <aside className="w-96 border-l border-neutral-800 flex flex-col min-h-0">
+          <div className="flex border-b border-neutral-800 text-xs font-mono">
+            <button
+              type="button"
+              onClick={() => setSidebarTab("layout")}
+              className={
+                "flex-1 px-4 py-2 " +
+                (sidebarTab === "layout"
+                  ? "text-neutral-100 border-b-2 border-blue-500"
+                  : "text-neutral-500 hover:text-neutral-300")
+              }
+            >
+              Layout
+            </button>
+            <button
+              type="button"
+              onClick={() => setSidebarTab("device")}
+              className={
+                "flex-1 px-4 py-2 " +
+                (sidebarTab === "device"
+                  ? "text-neutral-100 border-b-2 border-blue-500"
+                  : "text-neutral-500 hover:text-neutral-300") +
+                (settingsSaving ? " opacity-60" : "")
+              }
+            >
+              Device
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {sidebarTab === "layout" ? (
+              <ConfigPanel
+                selected={selected}
+                layout={layout}
+                behaviors={behaviors}
+                rendered={rendered}
+                onChange={setLayout}
+              />
+            ) : settings ? (
+              <SettingsPanel settings={settings} onChange={onSettingsChange} />
+            ) : (
+              <div className="p-4 text-sm text-neutral-500">Loading…</div>
+            )}
+          </div>
         </aside>
       </div>
     </div>

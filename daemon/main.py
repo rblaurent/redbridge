@@ -43,6 +43,12 @@ class Layout(BaseModel):
     strip: dict[str, BehaviorAssignment] = Field(default_factory=dict)
 
 
+class DeviceSettings(BaseModel):
+    brightness: int = Field(default=75, ge=0, le=100)
+    screensaver_minutes: int = Field(default=15, ge=0, le=60)
+    tick_hz: int = Field(default=4, ge=1, le=30)
+
+
 class BehaviorInfo(BaseModel):
     type_id: str
     display_name: str
@@ -73,15 +79,34 @@ def _fill_defaults(layout: Layout) -> Layout:
     return layout
 
 
-def load_layout() -> Layout:
+def _read_config() -> dict[str, Any]:
     if not CONFIG_PATH.is_file():
+        return {}
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError):
+        CONFIG_PATH.replace(CONFIG_PATH.with_suffix(".json.bad"))
+        return {}
+
+
+def _write_config(data: dict[str, Any]) -> None:
+    tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    tmp.replace(CONFIG_PATH)
+
+
+def load_layout() -> Layout:
+    data = _read_config()
+    if not data:
         layout = default_layout()
         save_layout(layout)
         return layout
     try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         return _fill_defaults(Layout.model_validate(data))
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         CONFIG_PATH.replace(CONFIG_PATH.with_suffix(".json.bad"))
         layout = default_layout()
         save_layout(layout)
@@ -90,12 +115,20 @@ def load_layout() -> Layout:
 
 def save_layout(layout: Layout) -> None:
     _fill_defaults(layout)
-    tmp = CONFIG_PATH.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps(layout.model_dump(), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    tmp.replace(CONFIG_PATH)
+    data = _read_config()
+    data.update(layout.model_dump())
+    _write_config(data)
+
+
+def load_settings() -> DeviceSettings:
+    data = _read_config()
+    return DeviceSettings.model_validate(data.get("settings", {}))
+
+
+def save_settings(settings: DeviceSettings) -> None:
+    data = _read_config()
+    data["settings"] = settings.model_dump()
+    _write_config(data)
 
 
 def _validate_layout_behaviors(layout: Layout) -> list[str]:
@@ -124,6 +157,7 @@ async def lifespan(_app: FastAPI):
     loop = asyncio.get_running_loop()
     _runtime = DeckRuntime(hub, loop)
     _runtime.start()
+    _runtime.apply_settings(load_settings())
     _runtime.apply_layout(load_layout())
     try:
         yield
@@ -169,6 +203,19 @@ def put_layout(layout: Layout) -> Layout:
     if _runtime is not None:
         _runtime.apply_layout(layout)
     return layout
+
+
+@app.get("/api/settings", response_model=DeviceSettings)
+def get_settings() -> DeviceSettings:
+    return load_settings()
+
+
+@app.put("/api/settings", response_model=DeviceSettings)
+def put_settings(settings: DeviceSettings) -> DeviceSettings:
+    save_settings(settings)
+    if _runtime is not None:
+        _runtime.apply_settings(settings)
+    return settings
 
 
 @app.get("/api/state", response_model=StateSnapshot)

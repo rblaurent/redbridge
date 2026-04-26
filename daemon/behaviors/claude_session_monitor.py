@@ -234,9 +234,6 @@ class ClaudeSessionCarousel(Behavior):
         draw = ImageDraw.Draw(img)
 
         if n == 0:
-            f = font(14)
-            draw.text((w // 2, h // 2), "No sessions", fill=(80, 80, 80),
-                       font=f, anchor="mm")
             return img
 
         scroll_top = max(0, min(idx - 1, n - VISIBLE_ROWS))
@@ -306,9 +303,6 @@ class ClaudeSessionDetail(Behavior):
         draw = ImageDraw.Draw(img)
 
         if n == 0:
-            f = font(14)
-            draw.text((w // 2, h // 2), "No session selected", fill=(80, 80, 80),
-                       font=f, anchor="mm")
             return img
 
         s = sessions[idx]

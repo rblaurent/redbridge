@@ -55,10 +55,43 @@ KEYEVENTF_KEYUP = 0x0002
 ASFW_ANY = 0xFFFFFFFF
 
 
+_kernel32.GetConsoleTitleW.argtypes = [ctypes.c_wchar_p, wintypes.DWORD]
+_kernel32.GetConsoleTitleW.restype = wintypes.DWORD
+
+
 def is_window(hwnd: int | None) -> bool:
     if not hwnd:
         return False
     return bool(_user32.IsWindow(wintypes.HWND(hwnd)))
+
+
+def get_console_title(hwnd: int | None) -> str:
+    """Read the console title for the process that owns ``hwnd``."""
+    if not hwnd:
+        return ""
+    pid = wintypes.DWORD(0)
+    _user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+    if not pid.value:
+        return ""
+    try:
+        _kernel32.FreeConsole()
+    except OSError:
+        pass
+    if not _kernel32.AttachConsole(pid.value):
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        _kernel32.GetConsoleTitleW(buf, 1024)
+        title = buf.value
+        # Strip leading status glyph (Claude Code prefixes a spinner char)
+        if title and not title[0].isalnum():
+            title = title.lstrip().removeprefix(title[0]).lstrip()
+        return title
+    finally:
+        try:
+            _kernel32.FreeConsole()
+        except OSError:
+            pass
 
 
 def _nudge_foreground() -> None:

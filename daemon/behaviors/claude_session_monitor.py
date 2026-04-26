@@ -22,7 +22,7 @@ from behaviors.base import Behavior, EventBus, Target, TargetKind
 from gfx import font
 from registry import register
 from sessions import SESSIONS, SessionInfo
-from win_focus import focus_window, is_window
+from win_focus import focus_window, get_console_title, is_window
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,6 @@ def _set_selected(idx: int) -> None:
 
 @dataclass
 class _TranscriptMeta:
-    title: str = ""
     context_used: int = 0
     context_max: int = DEFAULT_CONTEXT_MAX
     last_read: float = 0.0
@@ -87,7 +86,6 @@ def _read_transcript_meta(session_id: str, transcript_path: str) -> _TranscriptM
 
     meta = _TranscriptMeta(last_read=time.monotonic())
     if cached:
-        meta.title = cached.title
         meta.context_used = cached.context_used
         meta.context_max = cached.context_max
 
@@ -102,16 +100,12 @@ def _read_transcript_meta(session_id: str, transcript_path: str) -> _TranscriptM
         with open(transcript_path, "rb") as f:
             f.seek(max(0, size - read_bytes))
             tail = f.read().decode("utf-8", "replace")
-        lines = tail.strip().split("\n")
-        for line in reversed(lines):
+        for line in reversed(tail.strip().split("\n")):
             try:
                 d = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
-            t = d.get("type")
-            if t == "custom-title" and not meta.title:
-                meta.title = d.get("customTitle", "")
-            elif t == "assistant" and meta.context_used == 0:
+            if d.get("type") == "assistant" and meta.context_used == 0:
                 usage = (d.get("message") or {}).get("usage")
                 if usage:
                     meta.context_used = (
@@ -119,8 +113,7 @@ def _read_transcript_meta(session_id: str, transcript_path: str) -> _TranscriptM
                         + usage.get("cache_creation_input_tokens", 0)
                         + usage.get("cache_read_input_tokens", 0)
                     )
-            if meta.title and meta.context_used:
-                break
+                    break
     except Exception as e:
         print(f"[session_monitor] transcript read error: {e}", flush=True)
 
@@ -291,7 +284,7 @@ class ClaudeSessionCarousel(Behavior):
             text_color = (255, 255, 255) if selected else (190, 190, 190)
             name = _workspace_name(s.cwd)
             name = _truncate(draw, name, row_font, w - 22)
-            draw.text((18, y + ROW_H // 2), name, fill=text_color, font=row_font, anchor="lm")
+            draw.text((18, y + ROW_H // 2 - 2), name, fill=text_color, font=row_font, anchor="lm")
 
         return img
 
@@ -317,8 +310,9 @@ class ClaudeSessionDetail(Behavior):
         if sessions:
             s = sessions[idx]
             meta = _read_transcript_meta(s.session_id, s.transcript_path)
+            title = get_console_title(s.hwnd)
             key = (s.session_id, s.last_hook, s.cwd, s.tool_name, idx,
-                   meta.title, meta.context_used)
+                   title, meta.context_used)
         else:
             key = ()
         if key != self._prev_key:
@@ -348,8 +342,8 @@ class ClaudeSessionDetail(Behavior):
         # Accent bar
         draw.rectangle((0, 0, 3, h), fill=color)
 
-        # Session title (primary heading)
-        title_text = meta.title or _workspace_name(s.cwd)
+        # Session title (primary heading — read from console window title)
+        title_text = get_console_title(s.hwnd) or _workspace_name(s.cwd)
         nf = font(15)
         title_text = _truncate(draw, title_text, nf, w - 16)
         draw.text((10, 10), title_text, fill=(255, 255, 255), font=nf, anchor="lm")

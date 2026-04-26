@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import behaviors  # noqa: F401 — side-effect: populates registry
-from registry import all_behaviors
+from registry import all_behaviors, reload_behaviors
 from runtime import DeckRuntime
 from sessions import HOOKS, SESSIONS, event_from_payload
 
@@ -173,6 +173,15 @@ app = FastAPI(title="redbridge-daemon", lifespan=lifespan)
 @app.get("/api/ping")
 def ping() -> dict[str, str]:
     return {"ok": "pong"}
+
+
+@app.post("/api/reload")
+def post_reload() -> dict[str, Any]:
+    reload_behaviors()
+    count = len(all_behaviors())
+    if _runtime is not None:
+        _runtime.apply_layout(load_layout())
+    return {"ok": True, "behaviors": count}
 
 
 @app.get("/api/behaviors", response_model=list[BehaviorInfo])

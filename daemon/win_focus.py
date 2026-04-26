@@ -47,6 +47,15 @@ _user32.keybd_event.argtypes = [
 _user32.keybd_event.restype = None
 _user32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
 _user32.AllowSetForegroundWindow.restype = wintypes.BOOL
+_user32.IsWindowVisible.argtypes = [wintypes.HWND]
+_user32.IsWindowVisible.restype = wintypes.BOOL
+_user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+_user32.GetWindowTextLengthW.restype = ctypes.c_int
+_user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+_user32.GetWindowTextW.restype = ctypes.c_int
+_WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+_user32.EnumWindows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
+_user32.EnumWindows.restype = wintypes.BOOL
 _kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 
 SW_RESTORE = 9
@@ -57,6 +66,38 @@ ASFW_ANY = 0xFFFFFFFF
 
 _kernel32.GetConsoleTitleW.argtypes = [ctypes.c_wchar_p, wintypes.DWORD]
 _kernel32.GetConsoleTitleW.restype = wintypes.DWORD
+
+
+_user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+_user32.GetClassNameW.restype = ctypes.c_int
+
+
+def find_window_by_title(
+    needle: str,
+    *,
+    window_class: str = "",
+) -> int:
+    result = [0]
+    @_WNDENUMPROC
+    def _cb(hwnd, _lparam):
+        if not _user32.IsWindowVisible(hwnd):
+            return True
+        if window_class:
+            cls = ctypes.create_unicode_buffer(256)
+            _user32.GetClassNameW(hwnd, cls, 256)
+            if cls.value != window_class:
+                return True
+        length = _user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        _user32.GetWindowTextW(hwnd, buf, length + 1)
+        if needle.lower() in buf.value.lower():
+            result[0] = hwnd
+            return False
+        return True
+    _user32.EnumWindows(_cb, 0)
+    return result[0]
 
 
 def is_window(hwnd: int | None) -> bool:

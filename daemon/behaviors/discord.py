@@ -23,10 +23,10 @@ import uuid
 from ctypes import wintypes
 from dataclasses import dataclass, field
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 from behaviors.base import Behavior, EventBus, Target, TargetKind
-from gfx import font
+from gfx import font, glow_bg
 from registry import register
 from win_focus import focus_window
 
@@ -63,6 +63,7 @@ DISCORD_GREEN = (87, 242, 135)
 DISCORD_RED = (237, 66, 69)
 DISCORD_ORANGE = (250, 168, 26)
 DIM_GREY = (80, 80, 80)
+GLOW_PEAK = (14, 16, 50)
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -273,9 +274,9 @@ class _IpcPipe:
 
     def recv(self) -> dict:
         _, header = self._wf.ReadFile(self._h, 8)
-        _op, length = struct.unpack("<II", header)
+        _op, length = struct.unpack("<II", bytes(header))
         _, data = self._wf.ReadFile(self._h, length)
-        return json.loads(data.decode("utf-8"))
+        return json.loads(bytes(data).decode("utf-8"))
 
     def close(self) -> None:
         try:
@@ -402,16 +403,12 @@ def _recv_loop_sync(pipe: _IpcPipe, httpx_mod, gen: int) -> None:
 
         try:
             msg = pipe.recv()
-        except Exception as e:
-            _log(f"recv error (pipe closed?): {e}")
+        except Exception:
             break
 
         cmd = msg.get("cmd")
         evt = msg.get("evt")
         data = msg.get("data") or {}
-
-        if cmd == "SET_VOICE_SETTINGS":
-            _log(f"SET_VOICE_SETTINGS sent — response: {msg}")
 
         if cmd == "DISPATCH" and evt == "VOICE_SETTINGS_UPDATE":
             with _lock:
@@ -766,16 +763,18 @@ class DiscordStrip(Behavior):
         if self._vol_overlay_active and not self._animating():
             progress = 1.0
 
+        bg = glow_bg(w, h, GLOW_PEAK)
+
         if progress <= 0:
-            return self._render_channel(s)
+            return ImageChops.lighter(bg, self._render_channel(s))
 
         img_ch = self._render_channel(s)
         img_vol = self._render_volume(s)
-        canvas = Image.new("RGB", (w, h), (0, 0, 0))
+        content = Image.new("RGB", (w, h), (0, 0, 0))
         y_off = int(h * progress)
-        canvas.paste(img_ch, (0, -y_off))
-        canvas.paste(img_vol, (0, h - y_off))
-        return canvas
+        content.paste(img_ch, (0, -y_off))
+        content.paste(img_vol, (0, h - y_off))
+        return ImageChops.lighter(bg, content)
 
 
 # ---------------------------------------------------------------------------

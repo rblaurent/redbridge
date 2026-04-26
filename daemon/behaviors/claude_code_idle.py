@@ -137,7 +137,7 @@ class ClaudeCodeIdleBehavior(Behavior):
             color = CLAUDE_ORANGE
         else:
             glyph = FRAMES[0]
-            color = CLAUDE_ORANGE if w_count > 0 else IDLE_GREY
+            color = IDLE_GREY
 
         gf = _symbol_font(glyph_size)
         b = draw.textbbox((0, 0), glyph, font=gf)

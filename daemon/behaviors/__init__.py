@@ -3,7 +3,6 @@
 from behaviors import (  # noqa: F401
     claude_code_idle,
     claude_session_monitor,
-    claude_thinking,
     discord,
     empty,
     launch_app,

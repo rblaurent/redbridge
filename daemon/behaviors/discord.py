@@ -11,11 +11,11 @@ Five behaviors that share module-level state via a background RPC client:
 
 from __future__ import annotations
 
-import asyncio
 import ctypes
 import io
 import json
 import os
+import queue
 import struct
 import threading
 import time
@@ -57,6 +57,7 @@ AUTH_FAILURE_DELAY = 30.0
 CHANNEL_POLL_INTERVAL = 3.0
 VOLUME_OVERLAY_HOLD = 2.0
 VOLUME_ANIM_DURATION = 0.3
+DISCORD_VOL_MAX = 200
 
 DISCORD_BLURPLE = (88, 101, 242)
 DISCORD_GREEN = (87, 242, 135)
@@ -239,7 +240,7 @@ def _nonce() -> str:
 
 _poller_started = False
 _poller_start_lock = threading.Lock()
-_cmd_queue: asyncio.Queue | None = None
+_cmd_queue: queue.Queue | None = None
 _auth_prompted = False
 _generation = id(threading.Lock())
 
@@ -277,6 +278,14 @@ class _IpcPipe:
         _, data = self._wf.ReadFile(self._h, length)
         return json.loads(bytes(data).decode("utf-8"))
 
+    def has_data(self) -> bool:
+        try:
+            import win32pipe
+            _, avail, _ = win32pipe.PeekNamedPipe(self._h, 0)
+            return avail > 0
+        except Exception:
+            return False
+
     def close(self) -> None:
         try:
             self._wf.CloseHandle(self._h)
@@ -306,10 +315,8 @@ def _ipc_connect() -> _IpcPipe | None:
 def _rpc_loop(gen: int) -> None:
     import httpx
 
-    global _cmd_queue, _loop_ref
-    loop = asyncio.new_event_loop()
-    _loop_ref = loop
-    _cmd_queue = asyncio.Queue()
+    global _cmd_queue
+    _cmd_queue = queue.Queue()
 
     while gen == _generation:
         delay = RECONNECT_DELAY
@@ -396,9 +403,20 @@ def _recv_loop_sync(pipe: _IpcPipe, httpx_mod, gen: int) -> None:
         while _cmd_queue and not _cmd_queue.empty():
             try:
                 cmd, args = _cmd_queue.get_nowait()
+                _log(f"sending {cmd} {args}")
                 pipe.send(_rpc_payload(cmd, args))
             except Exception as e:
                 _log(f"send command error: {e}")
+
+        if not pipe.has_data():
+            time.sleep(0.05)
+            now = time.monotonic()
+            if now - last_poll >= CHANNEL_POLL_INTERVAL:
+                last_poll = now
+                s = _snap()
+                if s.in_voice:
+                    pipe.send(_rpc_payload("GET_SELECTED_VOICE_CHANNEL"))
+            continue
 
         try:
             msg = pipe.recv()
@@ -417,7 +435,9 @@ def _recv_loop_sync(pipe: _IpcPipe, httpx_mod, gen: int) -> None:
                     _state.deafened = bool(data["deaf"])
                 output = data.get("output", {})
                 if "volume" in output:
-                    _state.volume = output["volume"] / 100.0
+                    raw_vol = output["volume"]
+                    _log(f"VOICE_SETTINGS_UPDATE volume={raw_vol}")
+                    _state.volume = raw_vol / DISCORD_VOL_MAX
                 _state.last_update = time.monotonic()
 
         elif cmd == "DISPATCH" and evt == "VOICE_CHANNEL_SELECT":
@@ -447,14 +467,18 @@ def _recv_loop_sync(pipe: _IpcPipe, httpx_mod, gen: int) -> None:
             if evt != "ERROR" and data:
                 _update_guild(data, httpx_mod)
 
+        elif cmd == "SET_VOICE_SETTINGS" and evt == "ERROR":
+            _log(f"SET_VOICE_SETTINGS error: {data}")
+
         elif cmd == "GET_VOICE_SETTINGS" or (cmd == "SET_VOICE_SETTINGS" and evt != "ERROR"):
             if data:
                 output = data.get("output", {})
                 vol = output.get("volume", 0)
+                _log(f"{cmd} response volume={vol}")
                 with _lock:
                     _state.muted = bool(data.get("mute", False))
                     _state.deafened = bool(data.get("deaf", False))
-                    _state.volume = vol / 100.0
+                    _state.volume = vol / DISCORD_VOL_MAX
                     _state.last_update = time.monotonic()
 
         now = time.monotonic()
@@ -913,10 +937,9 @@ class DiscordVolume(Behavior):
         _ensure_poller()
 
     def on_rotate(self, delta: int) -> None:
-        s = _snap()
-        new_vol = max(0.0, min(1.0, s.volume + delta * 0.02))
-        new_pct = int(new_vol * 100)
-        _enqueue_cmd("SET_VOICE_SETTINGS", {"output": {"volume": new_pct}})
+        cur = _get_discord_volume()
+        new_vol = max(0.0, min(1.0, cur + delta * 0.02))
+        _set_discord_volume(new_vol)
         now = time.monotonic()
         with _lock:
             _state.volume = new_vol

@@ -145,7 +145,20 @@ def _truncate(draw: ImageDraw.ImageDraw, text: str, f, max_w: int) -> str:
 # Pill rendering
 # ---------------------------------------------------------------------------
 
-def _draw_pills(draw: ImageDraw.ImageDraw, w: int, n: int, selected_idx: int) -> None:
+def _blend(color: tuple[int, int, int], alpha: float) -> tuple[int, int, int]:
+    bg_r, bg_g, bg_b = STRIP_BG
+    r, g, b = color
+    return (
+        int(r * alpha + bg_r * (1 - alpha)),
+        int(g * alpha + bg_g * (1 - alpha)),
+        int(b * alpha + bg_b * (1 - alpha)),
+    )
+
+
+def _draw_pills(
+    draw: ImageDraw.ImageDraw, w: int, n: int, selected_idx: int,
+    sessions: list[SessionInfo],
+) -> None:
     if n <= 1:
         return
 
@@ -168,21 +181,16 @@ def _draw_pills(draw: ImageDraw.ImageDraw, w: int, n: int, selected_idx: int) ->
     for i in range(vis_count):
         actual_idx = vis_start + i
         px = start_x + i * (PILL_SIZE + PILL_GAP)
+        s = sessions[max(0, min(actual_idx, n - 1))]
+        base = _status_color(s.last_hook)
 
-        if actual_idx == selected_idx:
-            color = CLAUDE_ORANGE
-        else:
-            color = (30, 30, 32)
+        selected = actual_idx == selected_idx
+        alpha = 1.0 if selected else 0.3
 
         if (i == 0 and fade_left) or (i == vis_count - 1 and fade_right):
-            r, g, b = color
-            bg_r, bg_g, bg_b = STRIP_BG
-            a = 0.4
-            color = (
-                int(r * a + bg_r * (1 - a)),
-                int(g * a + bg_g * (1 - a)),
-                int(b * a + bg_b * (1 - a)),
-            )
+            alpha *= 0.4
+
+        color = _blend(base, alpha)
 
         draw.rounded_rectangle(
             (px, y, px + PILL_SIZE, y + PILL_SIZE),
@@ -282,11 +290,11 @@ class ClaudeSessionStrip(Behavior):
             else:
                 canvas.paste(from_frame, (x_off, 0))
                 canvas.paste(to_frame, (-w + x_off, 0))
-            _draw_pills(ImageDraw.Draw(canvas), w, n, anim_to)
+            _draw_pills(ImageDraw.Draw(canvas), w, n, anim_to, sessions)
             return canvas
 
         img = _render_detail_frame(w, h, sessions, idx, n)
-        _draw_pills(ImageDraw.Draw(img), w, n, idx)
+        _draw_pills(ImageDraw.Draw(img), w, n, idx, sessions)
         return img
 
 

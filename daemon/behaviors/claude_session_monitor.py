@@ -185,7 +185,7 @@ def _draw_pills(
         base = _status_color(s.last_hook)
 
         selected = actual_idx == selected_idx
-        alpha = 1.0 if selected else 0.3
+        alpha = 1.0 if selected else 0.5
 
         if (i == 0 and fade_left) or (i == vis_count - 1 and fade_right):
             alpha *= 0.4

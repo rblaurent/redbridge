@@ -180,7 +180,7 @@ def _draw_pills(draw: ImageDraw.ImageDraw, w: int, n: int, selected_idx: int) ->
         px = start_x + i * (PILL_SIZE + PILL_GAP)
 
         selected = actual_idx == selected_idx
-        alpha = 1.0 if selected else 0.3
+        alpha = 1.0 if selected else 0.5
 
         if (i == 0 and fade_left) or (i == vis_count - 1 and fade_right):
             alpha *= 0.4

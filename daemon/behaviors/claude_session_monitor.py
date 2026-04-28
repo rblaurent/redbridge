@@ -1,25 +1,21 @@
-"""Claude Code session monitor — carousel, detail, scroll, focus.
+"""Claude Code session monitor — strip, scroll, focus.
 
-Four behaviors that work together via shared module-level state:
+Three behaviors that work together via shared module-level state:
 
-- claude_session_carousel  (strip)       — vertical scrollable session list
-- claude_session_detail    (strip)       — detail card for selected session
-- claude_session_scroll    (dial rotate) — scroll the carousel
-- claude_session_focus     (dial press)  — focus the selected session's terminal
+- claude_session_strip   (strip)       — detail card with pill page indicators
+- claude_session_scroll  (dial rotate) — page between sessions with swipe animation
+- claude_session_focus   (dial press)  — focus the selected session's terminal
 """
 
 from __future__ import annotations
 
-import json
-import os
 import threading
 import time
-from dataclasses import dataclass
 
 from PIL import Image, ImageDraw
 
 from behaviors.base import Behavior, EventBus, Target, TargetKind
-from gfx import STRIP_BG, font, font_semibold, font_semilight, strip_bg
+from gfx import STRIP_BG, SWIPE_ANIM_DURATION, ease_back_out, font, font_semibold, font_semilight, strip_bg
 from registry import register
 from sessions import SESSIONS, SessionInfo
 from win_focus import focus_window, get_console_title, is_window
@@ -29,27 +25,29 @@ from win_focus import focus_window, get_console_title, is_window
 # Constants
 # ---------------------------------------------------------------------------
 
-STALE_AFTER_SECONDS = 30 * 60
-DONE_STALE_SECONDS = 3 * 60
-
 THINKING_HOOKS = frozenset({"UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStop"})
 WAITING_HOOKS = frozenset({"Notification", "Stop"})
 
 CLAUDE_ORANGE = (193, 95, 60)
 STATUS_GREEN = (100, 180, 100)
-STATUS_RED = (210, 100, 80)
 DIM_GREY = (90, 90, 90)
 
-DEFAULT_CONTEXT_MAX = 1_000_000
-TRANSCRIPT_READ_INTERVAL = 5.0
+PILL_SIZE = 8
+PILL_GAP = 6
+PILL_R = 4
+MAX_PILLS = 9
 
 
 # ---------------------------------------------------------------------------
-# Shared carousel state
+# Shared state — selection + animation
 # ---------------------------------------------------------------------------
 
 _state_lock = threading.Lock()
 _selected_index: int = 0
+_anim_from: int = 0
+_anim_to: int = 0
+_anim_start: float = 0.0
+_anim_direction: int = 0
 
 
 def _get_selected() -> int:
@@ -63,63 +61,25 @@ def _set_selected(idx: int) -> None:
         _selected_index = idx
 
 
-# ---------------------------------------------------------------------------
-# Transcript metadata cache
-# ---------------------------------------------------------------------------
-
-@dataclass
-class _TranscriptMeta:
-    context_used: int = 0
-    context_max: int = DEFAULT_CONTEXT_MAX
-    last_read: float = 0.0
+def _start_anim(from_idx: int, to_idx: int, direction: int) -> None:
+    global _anim_from, _anim_to, _anim_start, _anim_direction
+    with _state_lock:
+        _anim_from = from_idx
+        _anim_to = to_idx
+        _anim_start = time.monotonic()
+        _anim_direction = direction
 
 
-_meta_lock = threading.Lock()
-_meta_cache: dict[str, _TranscriptMeta] = {}
+def _is_animating() -> bool:
+    with _state_lock:
+        if _anim_start == 0.0:
+            return False
+        return (time.monotonic() - _anim_start) < SWIPE_ANIM_DURATION
 
 
-def _read_transcript_meta(session_id: str, transcript_path: str) -> _TranscriptMeta:
-    with _meta_lock:
-        cached = _meta_cache.get(session_id)
-        if cached and (time.monotonic() - cached.last_read) < TRANSCRIPT_READ_INTERVAL:
-            return cached
-
-    meta = _TranscriptMeta(last_read=time.monotonic())
-    if cached:
-        meta.context_used = cached.context_used
-        meta.context_max = cached.context_max
-
-    if not transcript_path or not os.path.isfile(transcript_path):
-        with _meta_lock:
-            _meta_cache[session_id] = meta
-        return meta
-
-    try:
-        size = os.path.getsize(transcript_path)
-        read_bytes = min(size, 64 * 1024)
-        with open(transcript_path, "rb") as f:
-            f.seek(max(0, size - read_bytes))
-            tail = f.read().decode("utf-8", "replace")
-        for line in reversed(tail.strip().split("\n")):
-            try:
-                d = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if d.get("type") == "assistant" and meta.context_used == 0:
-                usage = (d.get("message") or {}).get("usage")
-                if usage:
-                    meta.context_used = (
-                        usage.get("input_tokens", 0)
-                        + usage.get("cache_creation_input_tokens", 0)
-                        + usage.get("cache_read_input_tokens", 0)
-                    )
-                    break
-    except Exception as e:
-        print(f"[session_monitor] transcript read error: {e}", flush=True)
-
-    with _meta_lock:
-        _meta_cache[session_id] = meta
-    return meta
+def _get_anim() -> tuple[int, int, float, int]:
+    with _state_lock:
+        return _anim_from, _anim_to, _anim_start, _anim_direction
 
 
 # ---------------------------------------------------------------------------
@@ -156,9 +116,7 @@ def _clamped_index(n: int) -> int:
 def _status_color(hook: str) -> tuple[int, int, int]:
     if hook in THINKING_HOOKS:
         return CLAUDE_ORANGE
-    if hook == "Notification":
-        return STATUS_GREEN
-    if hook == "Stop":
+    if hook in WAITING_HOOKS:
         return STATUS_GREEN
     return DIM_GREY
 
@@ -173,7 +131,6 @@ def _status_text(session: SessionInfo) -> str:
     return session.last_hook or "unknown"
 
 
-
 def _truncate(draw: ImageDraw.ImageDraw, text: str, f, max_w: int) -> str:
     if draw.textlength(text, font=f) <= max_w:
         return text
@@ -184,20 +141,98 @@ def _truncate(draw: ImageDraw.ImageDraw, text: str, f, max_w: int) -> str:
     return "..."
 
 
+# ---------------------------------------------------------------------------
+# Pill rendering
+# ---------------------------------------------------------------------------
+
+def _draw_pills(draw: ImageDraw.ImageDraw, w: int, n: int, selected_idx: int) -> None:
+    if n <= 1:
+        return
+
+    if n <= MAX_PILLS:
+        vis_start = 0
+        vis_count = n
+        fade_left = False
+        fade_right = False
+    else:
+        half = MAX_PILLS // 2
+        vis_start = max(0, min(selected_idx - half, n - MAX_PILLS))
+        vis_count = MAX_PILLS
+        fade_left = vis_start > 0
+        fade_right = vis_start + MAX_PILLS < n
+
+    total_w = vis_count * PILL_SIZE + (vis_count - 1) * PILL_GAP
+    start_x = (w - total_w) // 2
+    y = 82
+
+    for i in range(vis_count):
+        actual_idx = vis_start + i
+        px = start_x + i * (PILL_SIZE + PILL_GAP)
+
+        if actual_idx == selected_idx:
+            color = CLAUDE_ORANGE
+        else:
+            color = (30, 30, 32)
+
+        if (i == 0 and fade_left) or (i == vis_count - 1 and fade_right):
+            r, g, b = color
+            bg_r, bg_g, bg_b = STRIP_BG
+            a = 0.4
+            color = (
+                int(r * a + bg_r * (1 - a)),
+                int(g * a + bg_g * (1 - a)),
+                int(b * a + bg_b * (1 - a)),
+            )
+
+        draw.rounded_rectangle(
+            (px, y, px + PILL_SIZE, y + PILL_SIZE),
+            PILL_R,
+            fill=color,
+        )
+
 
 # ---------------------------------------------------------------------------
-# Carousel (strip)
+# Detail frame rendering (shared by static + animation paths)
 # ---------------------------------------------------------------------------
 
-ROW_H = 22
-VISIBLE_ROWS = 4
-ROW_START_Y = 6
+def _render_detail_frame(
+    w: int, h: int, sessions: list[SessionInfo], idx: int, n: int,
+) -> Image.Image:
+    img = strip_bg(w, h)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((0, 0, w, 2), fill=CLAUDE_ORANGE)
 
+    if n == 0:
+        return img
+
+    idx = max(0, min(idx, n - 1))
+    s = sessions[idx]
+    color = _status_color(s.last_hook)
+
+    title_text = get_console_title(s.hwnd) or _workspace_name(s.cwd)
+    tf = font_semibold(14)
+    title_text = _truncate(draw, title_text, tf, w - 20)
+    draw.text((10, 22), title_text, fill=(255, 255, 255), font=tf, anchor="lm")
+
+    draw.text((10, 42), _status_text(s), fill=color, font=font(11), anchor="lm")
+
+    if s.tool_name and s.last_hook in THINKING_HOOKS:
+        draw.text(
+            (10, 60), f"Tool: {s.tool_name}",
+            fill=(70, 70, 70), font=font_semilight(10), anchor="lm",
+        )
+
+    return img
+
+
+# ---------------------------------------------------------------------------
+# Strip (consolidated)
+# ---------------------------------------------------------------------------
 
 @register
-class ClaudeSessionCarousel(Behavior):
-    type_id = "claude_session_carousel"
-    display_name = "Claude sessions"
+class ClaudeSessionStrip(Behavior):
+    type_id = "claude_session_strip"
+    display_name = "Claude session"
     targets = {TargetKind.STRIP_REGION}
     config_schema = {"type": "object", "properties": {}}
 
@@ -206,79 +241,15 @@ class ClaudeSessionCarousel(Behavior):
         self._prev_key: tuple = ()
 
     def tick(self) -> bool:
-        sessions = _sorted_sessions()
-        idx = _clamped_index(len(sessions))
-        key = tuple(
-            (s.session_id, s.last_hook, s.cwd) for s in sessions
-        ) + (idx,)
-        if key != self._prev_key:
-            self._prev_key = key
+        if _is_animating():
             return True
-        return False
-
-    def render(self) -> Image.Image | None:
-        w, h = self.size()
         sessions = _sorted_sessions()
         n = len(sessions)
         idx = _clamped_index(n)
-
-        img = strip_bg(w, h)
-        draw = ImageDraw.Draw(img)
-        draw.rectangle((0, 0, w, 2), fill=CLAUDE_ORANGE)
-
-        if n == 0:
-            return img
-
-        scroll_top = max(0, min(idx - 1, n - VISIBLE_ROWS))
-        row_font = font_semibold(13)
-
-        for row_i in range(VISIBLE_ROWS):
-            si = scroll_top + row_i
-            if si >= n:
-                break
-            s = sessions[si]
-            y = ROW_START_Y + row_i * ROW_H
-            selected = si == idx
-
-            if selected:
-                draw.rounded_rectangle((4, y, w - 4, y + ROW_H - 2), 4, fill=CLAUDE_ORANGE)
-
-            dot_color = (255, 255, 255) if selected else _status_color(s.last_hook)
-            dot_y = y + ROW_H // 2
-            draw.ellipse((10, dot_y - 4, 18, dot_y + 4), fill=dot_color)
-
-            text_color = (255, 255, 255) if selected else (170, 170, 170)
-            name = _workspace_name(s.cwd)
-            name = _truncate(draw, name, row_font, w - 34)
-            draw.text((24, dot_y - 1), name, fill=text_color, font=row_font, anchor="lm")
-
-        return img
-
-
-# ---------------------------------------------------------------------------
-# Detail (strip)
-# ---------------------------------------------------------------------------
-
-@register
-class ClaudeSessionDetail(Behavior):
-    type_id = "claude_session_detail"
-    display_name = "Claude session detail"
-    targets = {TargetKind.STRIP_REGION}
-    config_schema = {"type": "object", "properties": {}}
-
-    def __init__(self, target: Target, config: dict, bus: EventBus) -> None:
-        super().__init__(target, config, bus)
-        self._prev_key: tuple = ()
-
-    def tick(self) -> bool:
-        sessions = _sorted_sessions()
-        idx = _clamped_index(len(sessions))
         if sessions:
             s = sessions[idx]
-            meta = _read_transcript_meta(s.session_id, s.transcript_path)
             title = get_console_title(s.hwnd)
-            key = (s.session_id, s.last_hook, s.cwd, s.tool_name, idx,
-                   title, meta.context_used)
+            key = (s.session_id, s.last_hook, s.cwd, s.tool_name, title, n, idx)
         else:
             key = ()
         if key != self._prev_key:
@@ -292,40 +263,30 @@ class ClaudeSessionDetail(Behavior):
         n = len(sessions)
         idx = _clamped_index(n)
 
-        img = strip_bg(w, h)
-        draw = ImageDraw.Draw(img)
-        draw.rectangle((0, 0, w, 2), fill=CLAUDE_ORANGE)
+        anim_from, anim_to, anim_start, anim_dir = _get_anim()
+        now = time.monotonic()
+        elapsed = now - anim_start if anim_start > 0 else SWIPE_ANIM_DURATION + 1
 
-        if n == 0:
-            return img
+        if elapsed < SWIPE_ANIM_DURATION and n > 0:
+            t = min(1.0, elapsed / SWIPE_ANIM_DURATION)
+            eased = ease_back_out(t)
+            x_off = int(w * eased)
 
-        s = sessions[idx]
-        meta = _read_transcript_meta(s.session_id, s.transcript_path)
-        color = _status_color(s.last_hook)
+            from_frame = _render_detail_frame(w, h, sessions, anim_from, n)
+            to_frame = _render_detail_frame(w, h, sessions, anim_to, n)
 
-        title_text = get_console_title(s.hwnd) or _workspace_name(s.cwd)
-        tf = font_semibold(14)
-        title_text = _truncate(draw, title_text, tf, w - 20)
-        draw.text((10, 22), title_text, fill=(255, 255, 255), font=tf, anchor="lm")
+            canvas = Image.new("RGB", (w, h), STRIP_BG)
+            if anim_dir < 0:
+                canvas.paste(from_frame, (-x_off, 0))
+                canvas.paste(to_frame, (w - x_off, 0))
+            else:
+                canvas.paste(from_frame, (x_off, 0))
+                canvas.paste(to_frame, (-w + x_off, 0))
+            _draw_pills(ImageDraw.Draw(canvas), w, n, anim_to)
+            return canvas
 
-        draw.text((10, 42), _status_text(s), fill=color, font=font(11), anchor="lm")
-
-        if s.tool_name and s.last_hook in THINKING_HOOKS:
-            draw.text((10, 60), f"Tool: {s.tool_name}",
-                       fill=(70, 70, 70), font=font_semilight(10), anchor="lm")
-
-        if meta.context_used > 0:
-            pct = min(1.0, meta.context_used / meta.context_max)
-            bar_fg = CLAUDE_ORANGE if pct < 0.8 else STATUS_RED
-            bx1, bx2, by, bh = 10, w - 10, 82, 8
-            bar_r = bh // 2
-            draw.rounded_rectangle((bx1, by, bx2, by + bh), bar_r, fill=(30, 30, 32))
-            fill_x = bx1 + int((bx2 - bx1) * pct)
-            if fill_x > bx1 + bar_r:
-                draw.rounded_rectangle(
-                    (bx1, by, fill_x, by + bh), bar_r, fill=bar_fg,
-                )
-
+        img = _render_detail_frame(w, h, sessions, idx, n)
+        _draw_pills(ImageDraw.Draw(img), w, n, idx)
         return img
 
 
@@ -345,8 +306,17 @@ class ClaudeSessionScroll(Behavior):
         n = len(sessions)
         if n == 0:
             return
-        idx = _get_selected() + delta
-        _set_selected(max(0, min(idx, n - 1)))
+        old_idx = _get_selected()
+        new_idx = max(0, min(old_idx + delta, n - 1))
+        if new_idx == old_idx:
+            return
+        direction = -1 if delta > 0 else 1
+        _set_selected(new_idx)
+        _start_anim(old_idx, new_idx, direction)
+        self.bus.publish("tick:boost", {
+            "hz": 60.0,
+            "until": time.monotonic() + SWIPE_ANIM_DURATION + 0.05,
+        })
 
 
 # ---------------------------------------------------------------------------

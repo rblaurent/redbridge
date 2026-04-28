@@ -1,8 +1,8 @@
 """Workspace launcher — pick a project folder and open Claude Code.
 
-One registered behavior (key toggle) plus four internal overlay behaviors
-that temporarily replace strip:0, strip:1, dial:0 rotate, and dial:0 press
-while the picker is active.
+One registered behavior (key toggle) plus three internal overlay behaviors
+that temporarily replace strip:0, dial:0 rotate, and dial:0 press while
+the picker is active.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import time
 from PIL import Image, ImageDraw
 
 from behaviors.base import Behavior, EventBus, Target, TargetKind
-from gfx import font, font_semibold, font_semilight, strip_bg
+from gfx import STRIP_BG, SWIPE_ANIM_DURATION, ease_back_out, font, font_semibold, font_semilight, strip_bg
 from registry import register
 
 PROJECTS_ROOT = r"T:\Projects"
@@ -23,10 +23,12 @@ _ASSETS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
 
 CLAUDE_ORANGE = (193, 95, 60)
 DIM_GREY = (90, 90, 90)
-ROW_H = 22
-VISIBLE_ROWS = 4
-ROW_START_Y = 6
 _TIMEOUT_S: float = 5.0
+
+PILL_SIZE = 8
+PILL_GAP = 6
+PILL_R = 4
+MAX_PILLS = 9
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -38,6 +40,11 @@ _selected_index: int = 0
 _workspaces: list[str] = []
 _overlay_refs: dict | None = None
 _last_interaction: float = 0.0
+
+_ws_anim_from: int = 0
+_ws_anim_to: int = 0
+_ws_anim_start: float = 0.0
+_ws_anim_direction: int = 0
 
 
 def _get_active() -> bool:
@@ -67,13 +74,35 @@ def _touch_interaction() -> None:
         _last_interaction = time.monotonic()
 
 
+def _start_ws_anim(from_idx: int, to_idx: int, direction: int) -> None:
+    global _ws_anim_from, _ws_anim_to, _ws_anim_start, _ws_anim_direction
+    with _state_lock:
+        _ws_anim_from = from_idx
+        _ws_anim_to = to_idx
+        _ws_anim_start = time.monotonic()
+        _ws_anim_direction = direction
+
+
+def _is_ws_animating() -> bool:
+    with _state_lock:
+        if _ws_anim_start == 0.0:
+            return False
+        return (time.monotonic() - _ws_anim_start) < SWIPE_ANIM_DURATION
+
+
+def _get_ws_anim() -> tuple[int, int, float, int]:
+    with _state_lock:
+        return _ws_anim_from, _ws_anim_to, _ws_anim_start, _ws_anim_direction
+
+
 def _close_picker(bus: EventBus) -> None:
-    global _picker_active, _overlay_refs
+    global _picker_active, _overlay_refs, _ws_anim_start
     with _state_lock:
         _picker_active = False
         _overlay_refs = None
+        _ws_anim_start = 0.0
     bus.publish("overlay:clear", {
-        "strip": [0, 1],
+        "strip": [0],
         "dial_rotate": [0],
         "dial_press": [0],
     })
@@ -110,6 +139,93 @@ def _truncate(draw: ImageDraw.ImageDraw, text: str, f, max_w: int) -> str:
         if draw.textlength(candidate, font=f) <= max_w:
             return candidate
     return "..."
+
+
+# ---------------------------------------------------------------------------
+# Pill rendering
+# ---------------------------------------------------------------------------
+
+def _draw_pills(draw: ImageDraw.ImageDraw, w: int, n: int, selected_idx: int) -> None:
+    if n <= 1:
+        return
+
+    if n <= MAX_PILLS:
+        vis_start = 0
+        vis_count = n
+        fade_left = False
+        fade_right = False
+    else:
+        half = MAX_PILLS // 2
+        vis_start = max(0, min(selected_idx - half, n - MAX_PILLS))
+        vis_count = MAX_PILLS
+        fade_left = vis_start > 0
+        fade_right = vis_start + MAX_PILLS < n
+
+    total_w = vis_count * PILL_SIZE + (vis_count - 1) * PILL_GAP
+    start_x = (w - total_w) // 2
+    y = 82
+
+    for i in range(vis_count):
+        actual_idx = vis_start + i
+        px = start_x + i * (PILL_SIZE + PILL_GAP)
+
+        if actual_idx == selected_idx:
+            color = CLAUDE_ORANGE
+        else:
+            color = (30, 30, 32)
+
+        if (i == 0 and fade_left) or (i == vis_count - 1 and fade_right):
+            r, g, b = color
+            bg_r, bg_g, bg_b = STRIP_BG
+            a = 0.4
+            color = (
+                int(r * a + bg_r * (1 - a)),
+                int(g * a + bg_g * (1 - a)),
+                int(b * a + bg_b * (1 - a)),
+            )
+
+        draw.rounded_rectangle(
+            (px, y, px + PILL_SIZE, y + PILL_SIZE),
+            PILL_R,
+            fill=color,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Workspace detail frame rendering
+# ---------------------------------------------------------------------------
+
+def _render_ws_frame(
+    w: int, h: int, workspaces: list[str], idx: int, n: int,
+) -> Image.Image:
+    img = strip_bg(w, h)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((0, 0, w, 2), fill=CLAUDE_ORANGE)
+
+    if n == 0:
+        draw.text(
+            (w // 2, h // 2), "No projects found",
+            fill=(70, 70, 70), font=font(14), anchor="mm",
+        )
+        return img
+
+    idx = max(0, min(idx, n - 1))
+    folder = workspaces[idx]
+
+    tf = font_semibold(14)
+    name = _truncate(draw, folder, tf, w - 20)
+    draw.text((10, 22), name, fill=(255, 255, 255), font=tf, anchor="lm")
+
+    pf = font(11)
+    path_text = _truncate(draw, os.path.join(PROJECTS_ROOT, folder), pf, w - 20)
+    draw.text((10, 42), path_text, fill=(120, 120, 120), font=pf, anchor="lm")
+
+    draw.text(
+        (10, 65), "Press dial to launch",
+        fill=(70, 70, 70), font=font_semilight(10), anchor="lm",
+    )
+
+    return img
 
 
 # ---------------------------------------------------------------------------
@@ -175,11 +291,8 @@ class WorkspaceLauncherToggle(Behavior):
         _touch_interaction()
         self.bus.publish("tick:boost", {"hz": 60.0, "until": time.monotonic() + 60})
 
-        carousel = _WorkspaceCarousel(
+        strip = _WorkspaceStrip(
             Target(TargetKind.STRIP_REGION, 0), {}, self.bus,
-        )
-        detail = _WorkspaceDetail(
-            Target(TargetKind.STRIP_REGION, 1), {}, self.bus,
         )
         scroll = _WorkspaceScroll(
             Target(TargetKind.DIAL_ROTATE, 0), {}, self.bus,
@@ -190,14 +303,13 @@ class WorkspaceLauncherToggle(Behavior):
 
         with _state_lock:
             _overlay_refs = {
-                "carousel": carousel,
-                "detail": detail,
+                "strip": strip,
                 "scroll": scroll,
                 "launch": launch,
             }
 
         self.bus.publish("overlay:set", {
-            "strip": {0: carousel, 1: detail},
+            "strip": {0: strip},
             "dial_rotate": {0: scroll},
             "dial_press": {0: launch},
         })
@@ -218,11 +330,11 @@ class WorkspaceLauncherToggle(Behavior):
 
 
 # ---------------------------------------------------------------------------
-# Carousel (overlay strip:0)
+# Strip (overlay strip:0 — consolidated)
 # ---------------------------------------------------------------------------
 
-class _WorkspaceCarousel(Behavior):
-    type_id = "_ws_carousel"
+class _WorkspaceStrip(Behavior):
+    type_id = "_ws_strip"
     targets = {TargetKind.STRIP_REGION}
 
     def __init__(self, target: Target, config: dict, bus: EventBus) -> None:
@@ -237,6 +349,8 @@ class _WorkspaceCarousel(Behavior):
         if elapsed >= _TIMEOUT_S:
             _close_picker(self.bus)
             return False
+        if _is_ws_animating():
+            return True
         ws = _get_workspaces()
         idx = _get_selected()
         key = (tuple(ws), idx)
@@ -251,90 +365,30 @@ class _WorkspaceCarousel(Behavior):
         n = len(ws)
         idx = max(0, min(_get_selected(), n - 1)) if n else 0
 
-        img = strip_bg(w, h)
-        draw = ImageDraw.Draw(img)
-        draw.rectangle((0, 0, w, 2), fill=CLAUDE_ORANGE)
+        anim_from, anim_to, anim_start, anim_dir = _get_ws_anim()
+        now = time.monotonic()
+        elapsed = now - anim_start if anim_start > 0 else SWIPE_ANIM_DURATION + 1
 
-        if n == 0:
-            draw.text((w // 2, h // 2), "No projects", fill=(70, 70, 70),
-                       font=font(14), anchor="mm")
-            return img
+        if elapsed < SWIPE_ANIM_DURATION and n > 0:
+            t = min(1.0, elapsed / SWIPE_ANIM_DURATION)
+            eased = ease_back_out(t)
+            x_off = int(w * eased)
 
-        scroll_top = max(0, min(idx - 1, n - VISIBLE_ROWS))
-        row_font = font_semibold(13)
+            from_frame = _render_ws_frame(w, h, ws, anim_from, n)
+            to_frame = _render_ws_frame(w, h, ws, anim_to, n)
 
-        for row_i in range(VISIBLE_ROWS):
-            si = scroll_top + row_i
-            if si >= n:
-                break
-            y = ROW_START_Y + row_i * ROW_H
-            selected = si == idx
+            canvas = Image.new("RGB", (w, h), STRIP_BG)
+            if anim_dir < 0:
+                canvas.paste(from_frame, (-x_off, 0))
+                canvas.paste(to_frame, (w - x_off, 0))
+            else:
+                canvas.paste(from_frame, (x_off, 0))
+                canvas.paste(to_frame, (-w + x_off, 0))
+            _draw_pills(ImageDraw.Draw(canvas), w, n, anim_to)
+            return canvas
 
-            if selected:
-                draw.rounded_rectangle((4, y, w - 4, y + ROW_H - 2), 4, fill=CLAUDE_ORANGE)
-
-            dot_color = (255, 255, 255) if selected else DIM_GREY
-            dot_y = y + ROW_H // 2
-            draw.ellipse((10, dot_y - 4, 18, dot_y + 4), fill=dot_color)
-
-            text_color = (255, 255, 255) if selected else (170, 170, 170)
-            name = _truncate(draw, ws[si], row_font, w - 34)
-            draw.text((24, dot_y - 1), name, fill=text_color,
-                       font=row_font, anchor="lm")
-
-        return img
-
-
-# ---------------------------------------------------------------------------
-# Detail (overlay strip:1)
-# ---------------------------------------------------------------------------
-
-class _WorkspaceDetail(Behavior):
-    type_id = "_ws_detail"
-    targets = {TargetKind.STRIP_REGION}
-
-    def __init__(self, target: Target, config: dict, bus: EventBus) -> None:
-        super().__init__(target, config, bus)
-        self._prev_key: tuple = ()
-
-    def tick(self) -> bool:
-        ws = _get_workspaces()
-        idx = _get_selected()
-        key = (tuple(ws), idx)
-        if key != self._prev_key:
-            self._prev_key = key
-            return True
-        return False
-
-    def render(self) -> Image.Image | None:
-        w, h = self.size()
-        ws = _get_workspaces()
-        n = len(ws)
-        idx = max(0, min(_get_selected(), n - 1)) if n else 0
-
-        img = strip_bg(w, h)
-        draw = ImageDraw.Draw(img)
-        draw.rectangle((0, 0, w, 2), fill=CLAUDE_ORANGE)
-        draw.rectangle((0, 0, 2, h), fill=CLAUDE_ORANGE)
-
-        if n == 0:
-            draw.text((w // 2, h // 2), "No projects found",
-                       fill=(70, 70, 70), font=font(14), anchor="mm")
-            return img
-
-        folder = ws[idx]
-
-        tf = font_semibold(14)
-        name = _truncate(draw, folder, tf, w - 24)
-        draw.text((12, 22), name, fill=(255, 255, 255), font=tf, anchor="lm")
-
-        pf = font(11)
-        path_text = _truncate(draw, os.path.join(PROJECTS_ROOT, folder), pf, w - 24)
-        draw.text((12, 42), path_text, fill=(120, 120, 120), font=pf, anchor="lm")
-
-        draw.text((12, h - 16), "Press dial to launch",
-                   fill=(70, 70, 70), font=font_semilight(10))
-
+        img = _render_ws_frame(w, h, ws, idx, n)
+        _draw_pills(ImageDraw.Draw(img), w, n, idx)
         return img
 
 
@@ -351,9 +405,18 @@ class _WorkspaceScroll(Behavior):
         n = len(ws)
         if n == 0:
             return
-        idx = _get_selected() + delta
-        _set_selected(max(0, min(idx, n - 1)))
+        old_idx = _get_selected()
+        new_idx = max(0, min(old_idx + delta, n - 1))
+        if new_idx == old_idx:
+            return
+        direction = -1 if delta > 0 else 1
+        _set_selected(new_idx)
+        _start_ws_anim(old_idx, new_idx, direction)
         _touch_interaction()
+        self.bus.publish("tick:boost", {
+            "hz": 60.0,
+            "until": time.monotonic() + SWIPE_ANIM_DURATION + 0.05,
+        })
 
 
 # ---------------------------------------------------------------------------

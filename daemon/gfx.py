@@ -49,3 +49,11 @@ def font_semibold(size: int) -> ImageFont.ImageFont:
 
 def font_semilight(size: int) -> ImageFont.ImageFont:
     return _load_font("semilight", size)
+
+
+SWIPE_ANIM_DURATION = 0.25
+
+
+def ease_back_out(t: float) -> float:
+    t = t - 1
+    return 1 + t * t * (2.7 * t + 1.7)

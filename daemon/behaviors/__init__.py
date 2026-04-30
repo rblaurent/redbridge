@@ -6,6 +6,7 @@ from behaviors import (  # noqa: F401
     discord,
     empty,
     launch_app,
+    redmatter_cms,
     run_command,
     spotify,
     static_label,

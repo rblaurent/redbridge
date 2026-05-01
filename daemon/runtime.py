@@ -72,6 +72,7 @@ class DeckRuntime:
         self._bus.subscribe("overlay:set", self._on_overlay_set)
         self._bus.subscribe("overlay:clear", self._on_overlay_clear)
         self._bus.subscribe("tick:boost", self._on_tick_boost)
+        self._bus.subscribe("column:swap", self._on_column_swap)
 
     # ---- lifecycle -----------------------------------------------------------
 
@@ -269,6 +270,25 @@ class DeckRuntime:
         self._boost_hz = float(payload.get("hz", 60.0))
         self._boost_until = float(payload.get("until", 0.0))
 
+    def _on_column_swap(self, payload: dict[str, Any]) -> None:
+        profile = payload.get("profile", {})
+        slots = [
+            ("key_1",         TargetKind.KEY,          self._keys,        1),
+            ("key_5",         TargetKind.KEY,          self._keys,        5),
+            ("dial_rotate_1", TargetKind.DIAL_ROTATE,  self._dial_rotate, 1),
+            ("dial_press_1",  TargetKind.DIAL_PRESS,   self._dial_press,  1),
+            ("strip_1",       TargetKind.STRIP_REGION, self._strip,       1),
+        ]
+        with self._lock:
+            for field, kind, store, idx in slots:
+                a = profile.get(field)
+                if a:
+                    cls = get_behavior(a["behavior"]) or get_behavior("empty")
+                    store[idx] = cls(Target(kind, idx), a.get("config", {}), self._bus)
+            self._dirty_keys.update({1, 5})
+            self._dirty_strips.add(1)
+        self._tick_wake.set()
+
     # ---- input ---------------------------------------------------------------
 
     def _on_key(self, _deck: Any, key: int, pressed: bool) -> None:
@@ -319,6 +339,17 @@ class DeckRuntime:
         x = int(value.get("x", 0)) if isinstance(value, dict) else 0
         idx = max(0, min(3, x // 200))
         self._broadcast_input(f"strip:{idx}", event.name.lower(), {"value": value})
+        if event == TouchscreenEventType.SHORT:
+            with self._lock:
+                b = self._overlay_strip.get(idx) or self._strip.get(idx)
+            if b is not None:
+                try:
+                    b.on_press()
+                except Exception as e:
+                    _log.error("strip.on_press(%d) failed: %s", idx, e)
+            with self._lock:
+                self._dirty_strips.add(idx)
+            self._tick_wake.set()
 
     # ---- tick ----------------------------------------------------------------
 

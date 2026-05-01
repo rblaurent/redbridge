@@ -65,18 +65,21 @@ def _symbol_font(size: int) -> ImageFont.ImageFont:
 
 
 def _poll() -> tuple[int, int, list[SessionInfo]]:
-    """Read the session store, prune stale/dead entries, return (thinking, waiting, alive)."""
+    """Read the session store, prune dead entries, return (thinking, waiting, alive).
+
+    Sessions with an hwnd are kept until their window is gone (SessionEnd or is_window check).
+    Sessions without an hwnd fall back to the stale timeout.
+    """
     now = time.monotonic()
     cutoff = now - STALE_AFTER_SECONDS
     alive: list[SessionInfo] = []
     for s in SESSIONS.snapshot():
         if not s.hwnd:
+            if s.last_seen < cutoff:
+                SESSIONS.drop(s.session_id)
+                print(f"[claude_code] purge session={s.session_id[:8]} reason=stale", flush=True)
             continue
-        if s.last_seen < cutoff:
-            SESSIONS.drop(s.session_id)
-            print(f"[claude_code] purge session={s.session_id[:8]} reason=stale", flush=True)
-            continue
-        if s.hwnd and not is_window(s.hwnd):
+        if not is_window(s.hwnd):
             SESSIONS.drop(s.session_id)
             print(f"[claude_code] purge session={s.session_id[:8]} reason=window gone", flush=True)
             continue

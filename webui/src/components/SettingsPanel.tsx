@@ -6,13 +6,15 @@ interface Props {
 }
 
 const SCREENSAVER_OPTIONS = [
-  { value: 0, label: "Off" },
-  { value: 1, label: "1 min" },
+  { value: 0, label: "Never" },
   { value: 5, label: "5 min" },
   { value: 10, label: "10 min" },
   { value: 15, label: "15 min" },
   { value: 30, label: "30 min" },
-  { value: 60, label: "60 min" },
+  { value: 60, label: "1 hour" },
+  { value: 120, label: "2 hours" },
+  { value: 240, label: "4 hours" },
+  { value: 480, label: "8 hours" },
 ];
 
 const TICK_HZ_OPTIONS = [1, 2, 4, 8, 15, 30];

@@ -321,7 +321,7 @@ class DeckRuntime:
             try:
                 b.on_press()
             except Exception as e:
-                _log.error("dial.on_press(%d) failed: %s", dial, e)
+                _log.error("dial.on_press(%d) failed: %s", dial, e, exc_info=True)
         elif event == DialEventType.TURN:
             delta = int(value)
             self._broadcast_input(f"dial:{dial}:rotate", "rotate", {"delta": delta})

@@ -38,13 +38,6 @@ _user32.BringWindowToTop.argtypes = [wintypes.HWND]
 _user32.BringWindowToTop.restype = wintypes.BOOL
 _user32.GetForegroundWindow.argtypes = []
 _user32.GetForegroundWindow.restype = wintypes.HWND
-_user32.keybd_event.argtypes = [
-    wintypes.BYTE,
-    wintypes.BYTE,
-    wintypes.DWORD,
-    ctypes.c_void_p,
-]
-_user32.keybd_event.restype = None
 _user32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
 _user32.AllowSetForegroundWindow.restype = wintypes.BOOL
 _user32.IsWindowVisible.argtypes = [wintypes.HWND]
@@ -62,6 +55,41 @@ SW_RESTORE = 9
 VK_MENU = 0x12
 KEYEVENTF_KEYUP = 0x0002
 ASFW_ANY = 0xFFFFFFFF
+INPUT_KEYBOARD = 1
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+SWP_NOMOVE = 0x0002
+SWP_NOSIZE = 0x0001
+SWP_SHOWWINDOW = 0x0040
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+
+class INPUT(ctypes.Structure):
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT)]
+    _fields_ = [
+        ("type", wintypes.DWORD),
+        ("_input", _INPUT_UNION),
+    ]
+
+
+_user32.SendInput.argtypes = [ctypes.c_uint, ctypes.POINTER(INPUT), ctypes.c_int]
+_user32.SendInput.restype = ctypes.c_uint
+_user32.SetWindowPos.argtypes = [
+    wintypes.HWND, wintypes.HWND,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    ctypes.c_uint,
+]
+_user32.SetWindowPos.restype = wintypes.BOOL
 
 
 _kernel32.GetConsoleTitleW.argtypes = [ctypes.c_wchar_p, wintypes.DWORD]
@@ -136,11 +164,16 @@ def get_console_title(hwnd: int | None) -> str:
 
 
 def _nudge_foreground() -> None:
-    """Press-and-release Alt so our process counts as having 'recent' input,
-    letting the next SetForegroundWindow succeed even under Win11's
-    foreground-stealing prevention."""
-    _user32.keybd_event(VK_MENU, 0, 0, None)
-    _user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, None)
+    """Press-and-release Alt via SendInput so our thread counts as having
+    'recent' input, letting the next SetForegroundWindow succeed even under
+    Win11's foreground-stealing prevention."""
+    inputs = (INPUT * 2)()
+    inputs[0].type = INPUT_KEYBOARD
+    inputs[0]._input.ki.wVk = VK_MENU
+    inputs[1].type = INPUT_KEYBOARD
+    inputs[1]._input.ki.wVk = VK_MENU
+    inputs[1]._input.ki.dwFlags = KEYEVENTF_KEYUP
+    _user32.SendInput(2, inputs, ctypes.sizeof(INPUT))
 
 
 class IVirtualDesktopManager(IUnknown):
@@ -182,6 +215,24 @@ def _get_vdm() -> IVirtualDesktopManager | None:
         print(f"[focus] VDM unavailable: {e}", flush=True)
         _vdm = None
     return _vdm
+
+
+def _is_on_current_desktop(hwnd: int) -> bool | None:
+    """Lightweight VDM check — avoids the heavy pyvda path.
+    Returns True/False, or None if COM is unavailable."""
+    global _vdm
+    vdm = _get_vdm()
+    if vdm is None:
+        return None
+    try:
+        on_current = wintypes.BOOL()
+        vdm.IsWindowOnCurrentVirtualDesktop(
+            wintypes.HWND(hwnd), ctypes.byref(on_current),
+        )
+        return bool(on_current.value)
+    except Exception:
+        _vdm = None
+        return None
 
 
 def _find_desktop_for_hwnd(hwnd: int):
@@ -238,7 +289,12 @@ def focus_window(hwnd: int | None) -> bool:
     if not _user32.IsWindow(h):
         return False
 
-    _switch_to_window_desktop(int(hwnd))
+    on_current = _is_on_current_desktop(int(hwnd))
+    if on_current is not True:
+        try:
+            _switch_to_window_desktop(int(hwnd))
+        except Exception:
+            pass
 
     target_tid = _user32.GetWindowThreadProcessId(h, None)
     if not target_tid:
@@ -257,8 +313,12 @@ def focus_window(hwnd: int | None) -> bool:
         _user32.BringWindowToTop(h)
         ok = bool(_user32.SetForegroundWindow(h))
         if not ok:
-            # Some Win11 builds need a second swing after the alt-tap settles.
             _user32.SetForegroundWindow(h)
+            ok = _user32.GetForegroundWindow() == int(hwnd)
+        if not ok:
+            flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+            _user32.SetWindowPos(h, wintypes.HWND(HWND_TOPMOST), 0, 0, 0, 0, flags)
+            _user32.SetWindowPos(h, wintypes.HWND(HWND_NOTOPMOST), 0, 0, 0, 0, flags)
             ok = _user32.GetForegroundWindow() == int(hwnd)
         return ok
     finally:

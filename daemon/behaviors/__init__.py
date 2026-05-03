@@ -7,6 +7,7 @@ from behaviors import (  # noqa: F401
     discord,
     empty,
     launch_app,
+    redcompute_jobs,
     redmatter_cms,
     run_command,
     spotify,

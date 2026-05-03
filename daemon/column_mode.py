@@ -29,6 +29,14 @@ COLUMN_1_PROFILES: list[dict] = [
         "dial_press_1":  {"behavior": "axl_session_focus",  "config": {}},
         "strip_1":       {"behavior": "axl_session_strip",  "config": {}},
     },
+    {
+        "name": "RedCompute",
+        "key_1":         {"behavior": "redcompute_launcher",   "config": {}},
+        "key_5":         {"behavior": "redcompute_job_status", "config": {}},
+        "dial_rotate_1": {"behavior": "redcompute_job_scroll", "config": {}},
+        "dial_press_1":  {"behavior": "redcompute_job_focus",  "config": {}},
+        "strip_1":       {"behavior": "redcompute_job_strip",  "config": {}},
+    },
 ]
 
 

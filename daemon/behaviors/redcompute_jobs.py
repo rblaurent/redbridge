@@ -36,11 +36,11 @@ POLL_INTERVAL = 3.0
 POLL_TIMEOUT = 2.0
 
 # Frieze colors (matching RedCompute FriezeColors.cs)
-COLOR_QUEUED = (0xFF, 0xB7, 0x4D)
-COLOR_RUNNING = (0x43, 0xA2, 0x5A)
+COLOR_QUEUED = (0xD4, 0xAA, 0x4F)
+COLOR_RUNNING = (0xD4, 0xAA, 0x4F)
 COLOR_COMPLETED = (0x26, 0xA6, 0x9A)
-COLOR_FAILED = (0xFF, 0x52, 0x52)
-COLOR_CANCELLED = (0x72, 0x76, 0x7D)
+COLOR_FAILED = (0xE5, 0x5B, 0x5B)
+COLOR_CANCELLED = (0x72, 0x7C, 0x7D)
 COLOR_IDLE = (0x2A, 0x2A, 0x2A)
 COLOR_EMPTY = (0x2A, 0x2A, 0x2A)
 
@@ -561,13 +561,13 @@ def _render_detail_frame(
 TIMELINE_CELLS = 16
 TIMELINE_ROWS = 4
 TIMELINE_COLS = 4
-QUANTUM_MS = 500
+QUANTUM_MS = 5000
 
 
 def _build_timeline(jobs: list[RedComputeJob]) -> list[tuple[int, int, int]]:
     """Build the last 16 cells of the unified activity timeline.
 
-    Uses 500ms quanta (same as RedCompute's Job Inspector Activity frieze),
+    Uses 5s quanta (same as RedCompute dashboard frieze),
     and returns only the most recent 16 quanta.
     """
     if not jobs:

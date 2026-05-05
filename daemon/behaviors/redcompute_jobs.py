@@ -56,9 +56,10 @@ MAX_STRIP_JOBS = 8
 
 CAP_ICON_SIZE = 14
 
-REDCOMPUTE_WINDOW_TITLE = "RedCompute"
-REDCOMPUTE_WINDOW_CLASS_PREFIX = "HwndWrapper[RedCompute"
 REDCOMPUTE_EXE = r"T:\Projects\RedCompute\src\RedCompute.App\bin\Debug\net9.0-windows\RedCompute.exe"
+REDCOMPUTE_DASHBOARD_URL = "http://localhost:18800"
+REDCOMPUTE_DASHBOARD_TITLE = "RedCompute"
+CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 _DAEMON_DIR = os.path.dirname(os.path.dirname(__file__))
 
@@ -384,42 +385,36 @@ def _clamped_index(n: int) -> int:
     return max(0, min(idx, n - 1))
 
 
-def _find_redcompute_hwnd() -> int:
-    """Find the WPF main window by title + class prefix."""
-    import ctypes
-    from ctypes import wintypes
-    u32 = ctypes.WinDLL("user32", use_last_error=True)
-    _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    result = [0]
-
-    @_WNDENUMPROC
-    def _cb(hwnd, _lparam):
-        if not u32.IsWindowVisible(hwnd):
-            return True
-        cls = ctypes.create_unicode_buffer(256)
-        u32.GetClassNameW(hwnd, cls, 256)
-        if not cls.value.startswith(REDCOMPUTE_WINDOW_CLASS_PREFIX):
-            return True
-        length = u32.GetWindowTextLengthW(hwnd)
-        if length == 0:
-            return True
-        buf = ctypes.create_unicode_buffer(length + 1)
-        u32.GetWindowTextW(hwnd, buf, length + 1)
-        if REDCOMPUTE_WINDOW_TITLE.lower() in buf.value.lower():
-            result[0] = int(hwnd)
-            return False
-        return True
-
-    u32.EnumWindows(_cb, 0)
-    return result[0]
-
-
 def _focus_redcompute() -> bool:
-    hwnd = _find_redcompute_hwnd()
+    hwnd = find_window_by_title(REDCOMPUTE_DASHBOARD_TITLE, window_class="Chrome_WidgetWin_1")
     if hwnd:
         focus_window(hwnd)
         return True
     return False
+
+
+def _is_backend_up() -> bool:
+    import httpx
+    try:
+        resp = httpx.get(f"{REDCOMPUTE_BASE}/status", timeout=2.0)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _start_and_open_dashboard() -> None:
+    if not _is_backend_up():
+        print("[redcompute] starting backend", flush=True)
+        subprocess.Popen(
+            [REDCOMPUTE_EXE],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        for _ in range(15):
+            time.sleep(1)
+            if _is_backend_up():
+                break
+
+    subprocess.Popen([CHROME_PATH, f"--app={REDCOMPUTE_DASHBOARD_URL}"])
 
 
 # ---------------------------------------------------------------------------
@@ -711,10 +706,9 @@ class RedComputeLauncher(Behavior):
     def on_press(self) -> None:
         if _focus_redcompute():
             return
-        subprocess.Popen(
-            [REDCOMPUTE_EXE],
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
+        threading.Thread(
+            target=_start_and_open_dashboard, daemon=True,
+        ).start()
 
 
 # ---------------------------------------------------------------------------

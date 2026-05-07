@@ -4,6 +4,7 @@ from behaviors import (  # noqa: F401
     axl_inspector,
     claude_code_idle,
     claude_session_monitor,
+    claude_sessions,
     discord,
     empty,
     launch_app,
